@@ -1,11 +1,14 @@
 """
-시리얼 리더 + 스레드 안전 상태 저장소 (Everything Presence Lite / LD2450)
+상태 모델 + 스레드 안전 상태 저장소 (Everything Presence Lite / LD2450)
 
-- 백그라운드 스레드에서 USB-시리얼(/dev/cu.usbserial-*)을 115200 baud 로 읽는다.
-- 한 줄씩 mmwave_parser 로 파싱하여 타겟 상태를 갱신한다.
-- 연결이 끊기면 자동 재연결한다.
-- 장치가 없거나 --demo 모드면, 합성 타겟을 생성해 하드웨어 없이도 시각화를 시연한다.
+- SensorState/SensorHub 로 타겟 상태를 스레드 안전하게 보관·갱신한다.
+  (mmwave_parser 가 만든 업데이트를 apply_updates() 로 반영)
+- room_transform 등으로 센서 로컬 좌표를 방(room) 좌표계로 변환한다.
+- --demo 모드면 합성 센서(DemoSensorThread)로 하드웨어 없이 시각화를 시연한다.
 - snapshot() 으로 JSON 직렬화 가능한 현재 상태 스냅샷을 얻는다.
+- autodetect_port() 는 프로비저닝용 USB-시리얼 포트 자동 탐지에만 쓰인다.
+
+무선(Wi-Fi) 데이터 수신 자체는 mmwave_wifi_reader.py 가 담당한다.
 """
 
 from __future__ import annotations
@@ -17,8 +20,6 @@ import threading
 import time
 from collections import deque
 from typing import Deque, Dict, List, Optional, Tuple
-
-import serial  # pyserial
 
 import mmwave_parser as P
 from fusion import FusionTracker, tracker_params
@@ -190,123 +191,6 @@ class SensorState:
                 },
                 "config": {"range_mm": RANGE_MM, "fov_deg": FOV_DEG, "max_targets": MAX_TARGETS},
             }
-
-
-class SerialReaderThread(threading.Thread):
-    """시리얼 포트를 읽어 SensorState 를 갱신하는 백그라운드 스레드 (자동 재연결)."""
-
-    def __init__(self, state: SensorState, port: Optional[str], baud: int = DEFAULT_BAUD):
-        super().__init__(daemon=True)
-        self.state = state
-        self.port = port
-        self.baud = baud
-        self._stop = threading.Event()
-
-    def stop(self):
-        self._stop.set()
-
-    def run(self):
-        while not self._stop.is_set():
-            port = self.port or autodetect_port()
-            if not port:
-                self.state.set_conn(False, None, "disconnected")
-                time.sleep(1.0)
-                continue
-            try:
-                ser = serial.Serial(port, self.baud, timeout=0.4)
-            except Exception:
-                self.state.set_conn(False, port, "disconnected")
-                time.sleep(1.5)
-                continue
-
-            self.state.set_conn(True, port, "serial")
-            time.sleep(0.3)
-            try:
-                ser.reset_input_buffer()
-            except Exception:
-                pass
-
-            buf = b""
-            transient = 0
-            while not self._stop.is_set():
-                try:
-                    chunk = ser.read(4096)
-                except serial.SerialException:
-                    # macOS CH340 에서 가끔 발생하는 일시적 오류는 몇 번 견딘다
-                    transient += 1
-                    if transient > 5:
-                        break
-                    time.sleep(0.05)
-                    continue
-                except Exception:
-                    break
-                transient = 0
-                if not chunk:
-                    continue
-                buf += chunk
-                # 너무 커지지 않도록 보호
-                if len(buf) > 1 << 20:
-                    buf = buf[-(1 << 16):]
-                while b"\n" in buf:
-                    raw, buf = buf.split(b"\n", 1)
-                    text = raw.decode("utf-8", errors="replace")
-                    now = time.monotonic()
-                    self.state.mark_line(now)
-                    self.state.apply_updates(P.parse_line(text), now)
-
-            try:
-                ser.close()
-            except Exception:
-                pass
-            self.state.set_conn(False, port, "disconnected")
-            time.sleep(1.0)  # 재연결 대기
-
-
-class DemoThread(threading.Thread):
-    """하드웨어 없이 시각화를 시연하기 위한 합성 타겟 생성기.
-
-    두 사람이 방 안에서 움직이는 상황을 Lissajous 곡선으로 흉내낸다.
-    """
-
-    def __init__(self, state: SensorState, phase: float = 0.0, label: str = "DEMO"):
-        super().__init__(daemon=True)
-        self.state = state
-        self.phase = phase        # 여러 데모 센서가 서로 다른 움직임을 보이도록 하는 위상 오프셋
-        self.label = label
-        self._stop = threading.Event()
-
-    def stop(self):
-        self._stop.set()
-
-    def run(self):
-        self.state.set_conn(True, self.label, "demo")
-        t = 0.0
-        ph = self.phase
-        while not self._stop.is_set():
-            now = time.monotonic()
-            # 타겟 1: 좌우로 걷기
-            x1 = 1800 * math.sin(t * 0.6 + ph)
-            y1 = 2200 + 600 * math.sin(t * 0.9 + 1.0 + ph)
-            # 타겟 2: 원형으로 배회
-            x2 = 1200 * math.cos(t * 0.4 + ph)
-            y2 = 3400 + 900 * math.sin(t * 0.5 + ph)
-            for tid, (x, y) in ((1, (x1, y1)), (2, (x2, y2))):
-                self.state.apply_updates([
-                    {"kind": "target_active", "target": tid, "value": True},
-                    {"kind": "target", "target": tid, "field": "x", "value": x},
-                    {"kind": "target", "target": tid, "field": "y", "value": y},
-                    {"kind": "target", "target": tid, "field": "speed",
-                     "value": 0.3 * math.cos(t + tid)},
-                    {"kind": "target", "target": tid, "field": "angle",
-                     "value": P.angle_from_xy(x, y)},
-                ], now)
-            self.state.apply_updates([
-                {"kind": "illuminance", "value": 250 + 50 * math.sin(t * 0.2)},
-                {"kind": "zone_count", "zone": 1, "value": 2},
-            ], now)
-            self.state.mark_line(now)
-            t += 0.08
-            time.sleep(0.05)
 
 
 def _demo_people(t: float):
