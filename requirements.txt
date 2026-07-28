@@ -1,0 +1,5 @@
+# Everything Presence Lite · mmWave 실시간 시각화 (Wi-Fi 판) — 공통 의존성
+pyserial>=3.5         # USB Improv 프로비저닝 (provision_wifi.py)
+aioesphomeapi>=37     # 무선 데이터 수신: ESPHome Native API (port 6053)
+zeroconf>=0.130       # mDNS (<node>.local) 자동 해석/재연결
+# (웹 서버/SSE 푸시는 파이썬 표준 라이브러리 http.server 사용 — 추가 의존성 없음)

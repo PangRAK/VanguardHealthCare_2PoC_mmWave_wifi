@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VanguardHealthCare · mmWave Presence PoC</title>
+<style>
+  :root{
+    --bg:#0a0f14; --panel:#0f1620; --panel2:#131d29; --line:#1d2b3a;
+    --txt:#dce6f0; --muted:#7e93a8; --accent:#27e0c8; --accent2:#ffb454;
+    --t1:#27e0c8; --t2:#ffb454; --t3:#ff5d8f; --ok:#39d98a; --bad:#ff5d6c;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:radial-gradient(1200px 800px at 70% -10%, #11202c 0%, var(--bg) 60%);
+    color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",
+                "Apple SD Gothic Neo","Noto Sans KR",Arial,sans-serif;
+    display:flex;flex-direction:column;overflow:hidden;
+  }
+  header{
+    display:flex;align-items:center;gap:14px;padding:12px 20px;
+    border-bottom:1px solid var(--line);background:rgba(10,15,20,.6);backdrop-filter:blur(6px);
+  }
+  .logo{display:flex;flex-direction:column;line-height:1.15}
+  .logo b{font-size:15px;letter-spacing:.3px}
+  .logo span{font-size:11px;color:var(--muted)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--bad);box-shadow:0 0 10px var(--bad)}
+  .dot.on{background:var(--ok);box-shadow:0 0 10px var(--ok)}
+  .badge{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);
+    padding:5px 11px;border:1px solid var(--line);border-radius:20px;background:var(--panel)}
+  .spacer{flex:1}
+  .clock{font-variant-numeric:tabular-nums;font-size:12px;color:var(--muted)}
+  .ctrl{display:flex;gap:6px;align-items:center}
+  .btn{font-size:12px;color:var(--muted);background:var(--panel);border:1px solid var(--line);
+    padding:5px 11px;border-radius:8px;cursor:pointer;user-select:none}
+  .btn.active{color:var(--bg);background:var(--accent);border-color:var(--accent);font-weight:600}
+
+  main{flex:1;display:flex;min-height:0}
+  .radar-wrap{flex:1;position:relative;min-width:0}
+  canvas{position:absolute;inset:0;width:100%;height:100%}
+  .hint{position:absolute;left:16px;bottom:12px;font-size:11px;color:var(--muted);
+    background:rgba(10,15,20,.5);padding:4px 9px;border-radius:6px}
+
+  aside{width:340px;border-left:1px solid var(--line);background:var(--panel);
+    padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:13px 14px}
+  .card h3{margin:0 0 9px;font-size:11px;font-weight:600;letter-spacing:.6px;
+    text-transform:uppercase;color:var(--muted)}
+  .big{display:flex;align-items:baseline;gap:8px}
+  .big .num{font-size:40px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+  .big .unit{font-size:13px;color:var(--muted)}
+  .kv{display:flex;justify-content:space-between;font-size:12px;padding:3px 0}
+  .kv .k{color:var(--muted)} .kv .v{font-variant-numeric:tabular-nums}
+
+  /* 센서 카드 헤더 (색 스와치 + 이름 + 연결 pill) */
+  .scard h3{display:flex;align-items:center;gap:8px;text-transform:none;
+    letter-spacing:.2px;font-size:13px;color:var(--txt)}
+  .scard h3 .swatch{width:11px;height:11px;border-radius:3px;flex:0 0 auto}
+  .scard h3 .snm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  .tcard{border-left:3px solid var(--line);padding-left:11px;margin:8px 0 0;opacity:.45;transition:opacity .2s}
+  .tcard.present{opacity:1}
+  .tcard .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px}
+  .tcard .name{font-size:12px;font-weight:600}
+  .pill{font-size:10px;padding:2px 8px;border-radius:10px;background:#22303f;color:var(--muted)}
+  .pill.on{background:rgba(57,217,138,.16);color:var(--ok)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px}
+
+  .lux{display:flex;align-items:center;gap:10px}
+  .luxbar{flex:1;height:8px;border-radius:5px;background:#0c141d;overflow:hidden}
+  .luxfill{height:100%;background:linear-gradient(90deg,#3a4658,var(--accent2));width:0%}
+  footer{font-size:10.5px;color:var(--muted);padding:8px 20px;border-top:1px solid var(--line);
+    display:flex;gap:18px;flex-wrap:wrap;align-items:center}
+  .lg{display:inline-flex;align-items:center;gap:5px}
+  .sw{width:10px;height:10px;border-radius:3px}
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="connDot"></div>
+  <div class="logo">
+    <b>VanguardHealthCare · mmWave 재실 감지 PoC</b>
+    <span>Everything Presence Lite — HLK‑LD2450 24GHz Radar · Wi‑Fi · 다중 센서 오버레이</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="ctrl">
+    <div class="btn active" id="btnTrail">궤적</div>
+    <div class="btn active" id="btnVec">속도벡터</div>
+    <div class="btn" id="btnRaw">원시점</div>
+  </div>
+  <div class="badge"><span id="modeText">연결 대기…</span></div>
+  <div class="clock" id="clock">--:--:--</div>
+</header>
+
+<main>
+  <div class="radar-wrap">
+    <canvas id="radar"></canvas>
+    <div class="hint">위쪽 = 방 전방(+Y) · 융합 점 = 사람별 색(#ID) · 부채꼴 = 각 센서 시야각 ±60° · 원시점은 토글</div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h3>추적 인원 (융합)</h3>
+      <div class="big"><span class="num" id="presentCount" style="color:var(--accent)">0</span>
+        <span class="unit" id="sensorCount">센서 0개</span></div>
+      <div class="kv" style="margin-top:6px"><span class="k">원시 합계(중복 포함)</span>
+        <span class="v" id="rawTotal">0</span></div>
+    </div>
+
+    <!-- 추적 중인 사람(융합 트랙) 목록이 여기에 동적으로 채워진다 -->
+    <div id="trackList" style="display:flex;flex-direction:column;gap:14px"></div>
+
+    <!-- 센서별 카드가 여기에 동적으로 채워진다 -->
+    <div id="sensorList" style="display:flex;flex-direction:column;gap:14px"></div>
+  </aside>
+</main>
+
+<footer>
+  <span id="legend" style="display:inline-flex;gap:18px;flex-wrap:wrap"></span>
+  <span style="margin-left:auto">좌표계: 방(room) 좌표 mm · Y=전방 · 탐지범위 6m · 데이터=Wi‑Fi (ESPHome Native API)</span>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("radar");
+  const ctx = canvas.getContext("2d");
+
+  // 옵션 토글 (좌우반전 토글은 오버레이에서 제거 — flip 은 rx 에 이미 반영됨)
+  // raw = 원시(센서별) 점 표시 여부 — 기본 OFF. 평소엔 융합 점(사람당 하나)만 보인다.
+  const opt = {trail:true, vec:true, raw:false};
+  const bind = (id,key)=>{const el=document.getElementById(id);
+    el.onclick=()=>{opt[key]=!opt[key];el.classList.toggle("active",opt[key]);};};
+  bind("btnTrail","trail"); bind("btnVec","vec"); bind("btnRaw","raw");
+
+  // 최신 스냅샷 + 렌더용 보간 상태
+  let snap = null;
+  const RANGE_DEFAULT = 6000;
+  // 보간 위치: 키 = `${sensorId}/${targetId}` → {x,y} (방 좌표)
+  const render = {};
+  let sweep = 0;
+
+  // ---- 캔버스 DPI 대응 ----
+  let cw=0, ch=0, dpr=1;
+  function resize(){
+    const r = canvas.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    cw = r.width; ch = r.height;
+    canvas.width = Math.round(cw*dpr); canvas.height = Math.round(ch*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  window.addEventListener("resize", resize);
+
+  // ---- 방 좌표 → 화면 px : world bbox(여백 8%)를 캔버스에 맞춤, Y(전방)는 위로 ----
+  function geom(){
+    const w = (snap && snap.world) ||
+              {x_min:-RANGE_DEFAULT, x_max:RANGE_DEFAULT, y_min:0, y_max:RANGE_DEFAULT};
+    let wx = w.x_max - w.x_min, wy = w.y_max - w.y_min;
+    if(!(wx>0)) wx = 1; if(!(wy>0)) wy = 1;
+    const mx = wx*0.08, my = wy*0.08;         // 8% 여백
+    const x0 = w.x_min - mx, x1 = w.x_max + mx;
+    const y0 = w.y_min - my, y1 = w.y_max + my;
+    const worldW = x1 - x0, worldH = y1 - y0;
+    const scale = Math.min(cw/worldW, ch/worldH);
+    const offX = (cw - worldW*scale)/2;        // 캔버스 중앙 정렬
+    const offY = (ch - worldH*scale)/2;
+    return {x0, y0, x1, y1, scale, offX, offY};
+  }
+  function toScreen(rx, ry, g){
+    return [g.offX + (rx - g.x0)*g.scale, g.offY + (g.y1 - ry)*g.scale];
+  }
+
+  // ---- 센서 로컬 좌표(lx=좌우, ly=전방) → 방 좌표 (계약의 room_transform 식 그대로) ----
+  function roomTransform(s, lx, ly){
+    // 설치자세(Yaw·Pitch·Roll)로 왜곡된 보고좌표를 실제 바닥거리로 복원 (room = pos + A⁻¹·local)
+    const yaw = (s.heading_deg||0)*Math.PI/180;   // Yaw(좌우) → 동서남북 방향
+    const pit = (s.pitch_deg||0)*Math.PI/180;     // Pitch(상하) → 전방 스케일 1/cos
+    const rol = (s.roll_deg||0)*Math.PI/180;      // Roll(기울) → 좌우 스케일 1/cos
+    const sgn = s.flip ? -1 : 1;
+    const cP = Math.max(Math.cos(pit), 1e-3), cR = Math.max(Math.cos(rol), 1e-3);
+    const sP = Math.sin(pit), sR = Math.sin(rol);
+    const ux = sgn*lx/cR - ly*sR*sP/(cR*cP);      // secR 좌우 확대 + shear
+    const uy = ly/cP;                             // secP 전방 확대
+    const c = Math.cos(yaw), sn = Math.sin(yaw);
+    const rx = (s.x||0) + c*ux - sn*uy;
+    const ry = (s.y||0) + sn*ux + c*uy;
+    return [rx, ry];
+  }
+
+  // ---- 배경: 센서별 FOV 부채꼴 + 거리링 + 마커 ----
+  function drawSensor(s, g){
+    const R = s.range_mm || RANGE_DEFAULT;
+    const F = s.fov_deg || 60;
+    const col = s.color || "#27e0c8";
+    const [ox, oy] = toScreen(s.x||0, s.y||0, g);
+
+    // FOV 부채꼴 채우기 (센서 색상, 옅게)
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(ox, oy);
+    for(let d=-F; d<=F; d+=2){
+      const a = d*Math.PI/180;
+      const [rx,ry] = roomTransform(s, R*Math.sin(a), R*Math.cos(a));
+      const [sx,sy] = toScreen(rx, ry, g);
+      ctx.lineTo(sx, sy);
+    }
+    ctx.closePath();
+    const rEnd = Math.max(10, R*g.scale);
+    const grd = ctx.createRadialGradient(ox,oy,10, ox,oy,rEnd);
+    grd.addColorStop(0, hexA(col,.10)); grd.addColorStop(1, hexA(col,.015));
+    ctx.fillStyle = grd; ctx.fill();
+    ctx.clip();
+
+    // 은은한 레이더 스윕 (센서 색상, FOV 안에서 왕복)
+    const a0 = Math.sin(sweep) * F * Math.PI/180;
+    const [erx,ery] = roomTransform(s, R*Math.sin(a0), R*Math.cos(a0));
+    const [ex,ey] = toScreen(erx, ery, g);
+    const sg = ctx.createLinearGradient(ox,oy, ex,ey);
+    sg.addColorStop(0, hexA(col,.18)); sg.addColorStop(1, hexA(col,0));
+    ctx.strokeStyle = sg; ctx.lineWidth = 60;
+    ctx.beginPath(); ctx.moveTo(ox,oy); ctx.lineTo(ex,ey); ctx.stroke();
+    ctx.restore();
+
+    // 거리 동심원 (1m 간격)
+    ctx.lineWidth = 1; ctx.font = "10px -apple-system,sans-serif";
+    for(let r=1000; r<=R; r+=1000){
+      ctx.beginPath();
+      for(let d=-F; d<=F; d+=2){
+        const a = d*Math.PI/180;
+        const [rx,ry] = roomTransform(s, r*Math.sin(a), r*Math.cos(a));
+        const [sx,sy] = toScreen(rx, ry, g);
+        d===-F ? ctx.moveTo(sx,sy) : ctx.lineTo(sx,sy);
+      }
+      ctx.strokeStyle = "rgba(120,150,180,.14)"; ctx.stroke();
+    }
+
+    // FOV 경계선 + 중심선
+    for(const d of [-F, 0, F]){
+      const a = d*Math.PI/180;
+      const [rx,ry] = roomTransform(s, R*Math.sin(a), R*Math.cos(a));
+      const [sx,sy] = toScreen(rx, ry, g);
+      ctx.beginPath(); ctx.moveTo(ox,oy); ctx.lineTo(sx,sy);
+      ctx.strokeStyle = (Math.abs(d)===F) ? hexA(col,.30) : "rgba(120,150,180,.12)";
+      ctx.lineWidth = (Math.abs(d)===F) ? 1.3 : 1; ctx.stroke();
+    }
+
+    // 센서 마커 (원점 + 이름)
+    const pulse = 4 + 2*Math.abs(Math.sin(sweep*1.5));
+    ctx.beginPath(); ctx.arc(ox,oy,pulse+5,0,7); ctx.fillStyle = hexA(col,.18); ctx.fill();
+    ctx.beginPath(); ctx.arc(ox,oy,5,0,7); ctx.fillStyle = col; ctx.fill();
+    ctx.fillStyle = "rgba(126,147,168,.9)"; ctx.font = "10px -apple-system,sans-serif";
+    ctx.fillText(s.name || "SENSOR", ox+9, oy+4);
+  }
+
+  // ---- 타겟 그리기 (센서별 오버레이) ----
+  function drawTargets(g){
+    if(!snap || !snap.sensors) return;
+    snap.sensors.forEach((s, si) => {
+      const col = s.color || "#fff";
+      const [sox, soy] = [s.x||0, s.y||0];  // 센서 방 좌표(속도벡터 시선 기준점)
+      for(const t of (s.targets||[])){
+        const key = s.id + "/" + t.id;
+        if(!t.present){ render[key] = null; continue; }   // 사라지면 보간 상태 초기화
+        // 궤적 (방 좌표 rtrail)
+        if(opt.trail && t.rtrail && t.rtrail.length>1){
+          for(let i=1;i<t.rtrail.length;i++){
+            const [x0,y0]=toScreen(t.rtrail[i-1][0],t.rtrail[i-1][1],g);
+            const [x1,y1]=toScreen(t.rtrail[i][0],t.rtrail[i][1],g);
+            ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1);
+            ctx.strokeStyle=col; ctx.globalAlpha=(i/t.rtrail.length)*0.5;
+            ctx.lineWidth=2; ctx.stroke();
+          }
+          ctx.globalAlpha=1;
+        }
+        // 보간 위치 (방 좌표 rx,ry 를 lerp)
+        let rs = render[key];
+        if(!rs){ rs={x:t.rx,y:t.ry}; render[key]=rs; }
+        rs.x += (t.rx-rs.x)*0.28; rs.y += (t.ry-rs.y)*0.28;
+        const [sx,sy]=toScreen(rs.x,rs.y,g);
+
+        // 속도 벡터: 시선방향(센서→타겟) 단위벡터 * 부호있는 속도
+        if(opt.vec && Math.abs(t.speed)>0.03){
+          const dx=rs.x-sox, dy=rs.y-soy;
+          const norm=Math.hypot(dx,dy)||1;
+          const ux=dx/norm, uy=dy/norm, K=700;  // m/s -> mm 시각화 배율
+          const [ex,ey]=toScreen(rs.x+ux*t.speed*K, rs.y+uy*t.speed*K, g);
+          ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey);
+          ctx.strokeStyle=col; ctx.globalAlpha=.75; ctx.lineWidth=2.2; ctx.stroke();
+          const ang=Math.atan2(ey-sy,ex-sx);
+          ctx.beginPath(); ctx.moveTo(ex,ey);
+          ctx.lineTo(ex-9*Math.cos(ang-0.4), ey-9*Math.sin(ang-0.4));
+          ctx.lineTo(ex-9*Math.cos(ang+0.4), ey-9*Math.sin(ang+0.4));
+          ctx.closePath(); ctx.fillStyle=col; ctx.fill(); ctx.globalAlpha=1;
+        }
+        // glow + 점
+        ctx.beginPath(); ctx.arc(sx,sy,16,0,7);
+        const gg=ctx.createRadialGradient(sx,sy,2,sx,sy,16);
+        gg.addColorStop(0,col); gg.addColorStop(1,"transparent");
+        ctx.globalAlpha=.35; ctx.fillStyle=gg; ctx.fill(); ctx.globalAlpha=1;
+        ctx.beginPath(); ctx.arc(sx,sy,7,0,7); ctx.fillStyle=col; ctx.fill();
+        ctx.lineWidth=2; ctx.strokeStyle="rgba(255,255,255,.85)"; ctx.stroke();
+        // 라벨: S{n}·T{id} + 거리
+        ctx.fillStyle="#dce6f0"; ctx.font="11px -apple-system,sans-serif";
+        ctx.fillText(`S${si+1}·T${t.id} · ${(t.distance/1000).toFixed(2)}m`, sx+12, sy-8);
+        ctx.fillStyle="rgba(126,147,168,.9)";
+        ctx.fillText(`${t.speed>=0?"+":""}${t.speed.toFixed(2)} m/s`, sx+12, sy+6);
+      }
+    });
+  }
+
+  // ---- 융합 트랙 그리기 (사람당 점 하나 — 주 렌더) ----
+  // snap.tracks 중 confirmed 만: (x,y)→화면에 큰 점+glow+라벨(#id)+속도벡터(vx,vy)+궤적(trail).
+  // 색=t.color(사람별 팔레트). coasting(가려져 예측만)이면 반투명/외곽선만.
+  function drawTracks(g){
+    if(!snap || !snap.tracks) return;
+    const liveTrk = new Set();                   // 이번 프레임 확정 트랙 키 (소멸 트랙 보간상태 정리용)
+    for(const t of snap.tracks){
+      if(!t.confirmed) continue;                 // 확정 트랙만 사람으로 그린다(tentative 제외)
+      liveTrk.add("trk/"+t.id);
+      const col = t.color || "#4ea3ff";
+      const coast = !!t.coasting;
+      // 궤적 (방 좌표 trail)
+      if(opt.trail && t.trail && t.trail.length>1){
+        for(let i=1;i<t.trail.length;i++){
+          const [x0,y0]=toScreen(t.trail[i-1][0],t.trail[i-1][1],g);
+          const [x1,y1]=toScreen(t.trail[i][0],t.trail[i][1],g);
+          ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1);
+          ctx.strokeStyle=col; ctx.globalAlpha=(i/t.trail.length)*0.55;
+          ctx.lineWidth=2.4; ctx.stroke();
+        }
+        ctx.globalAlpha=1;
+      }
+      // 보간 위치 (방 좌표 x,y 를 lerp) — 키 = "trk/"+id (기존 방식과 동일, lerp 0.28)
+      const key="trk/"+t.id;
+      let rs=render[key];
+      if(!rs){ rs={x:t.x,y:t.y}; render[key]=rs; }
+      rs.x += (t.x-rs.x)*0.28; rs.y += (t.y-rs.y)*0.28;
+      const [sx,sy]=toScreen(rs.x,rs.y,g);
+      // 노이즈 흡수 반경 (config.noise_radius_mm, 방좌표 mm) — 이 트랙의 흡수 구역
+      // 반투명 채운 원. 점/글로우/벡터보다 먼저 그려 맨 아래 레이어로. R<=0 이면 스킵.
+      {
+        const R = (snap.config && snap.config.noise_radius_mm) || 0;
+        if(R > 0){
+          ctx.beginPath(); ctx.arc(sx, sy, R*g.scale, 0, 7);
+          ctx.fillStyle = hexA(col, 0.07); ctx.fill();
+        }
+      }
+      // 속도 벡터: (x,y) → (x+vx*K/1000, y+vy*K/1000)  K=700 (m/s 시각화 배율과 동일)
+      if(opt.vec && (Math.abs(t.vx)>30 || Math.abs(t.vy)>30)){
+        const K=700;
+        const [ex,ey]=toScreen(rs.x+t.vx*K/1000, rs.y+t.vy*K/1000, g);
+        ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey);
+        ctx.strokeStyle=col; ctx.globalAlpha=coast?.4:.85; ctx.lineWidth=2.6; ctx.stroke();
+        const ang=Math.atan2(ey-sy,ex-sx);
+        ctx.beginPath(); ctx.moveTo(ex,ey);
+        ctx.lineTo(ex-10*Math.cos(ang-0.4), ey-10*Math.sin(ang-0.4));
+        ctx.lineTo(ex-10*Math.cos(ang+0.4), ey-10*Math.sin(ang+0.4));
+        ctx.closePath(); ctx.fillStyle=col; ctx.fill(); ctx.globalAlpha=1;
+      }
+      // glow (융합 점은 원시 점보다 크게)
+      ctx.beginPath(); ctx.arc(sx,sy,24,0,7);
+      const gg=ctx.createRadialGradient(sx,sy,3,sx,sy,24);
+      gg.addColorStop(0,col); gg.addColorStop(1,"transparent");
+      ctx.globalAlpha=coast?.2:.4; ctx.fillStyle=gg; ctx.fill(); ctx.globalAlpha=1;
+      // 큰 점 — coasting(가려져 예측중)이면 반투명, 아니면 흰 외곽선 있는 진한 점
+      if(coast){
+        ctx.beginPath(); ctx.arc(sx,sy,11,0,7);
+        ctx.globalAlpha=.4; ctx.fillStyle=col; ctx.fill(); ctx.globalAlpha=1;
+        ctx.lineWidth=2.5; ctx.strokeStyle=col; ctx.stroke();
+      }else{
+        ctx.beginPath(); ctx.arc(sx,sy,11,0,7); ctx.fillStyle=col; ctx.fill();
+        ctx.lineWidth=2.5; ctx.strokeStyle="rgba(255,255,255,.9)"; ctx.stroke();
+      }
+      // 라벨: #id · 속력 · 센서수
+      ctx.globalAlpha=coast?.7:1;
+      ctx.fillStyle="#eef4fb"; ctx.font="bold 13px -apple-system,sans-serif";
+      ctx.fillText(`#${t.id}`, sx+15, sy-9);
+      ctx.fillStyle="rgba(206,222,238,.9)"; ctx.font="11px -apple-system,sans-serif";
+      ctx.fillText(`${t.speed.toFixed(2)} m/s · ${t.n_sensors}센서`, sx+15, sy+7);
+      ctx.globalAlpha=1;
+    }
+    // 소멸한 트랙의 보간 상태 제거(장기 실행 시 메모리 누적 방지)
+    for(const k of Object.keys(render)){
+      if(k.startsWith("trk/") && !liveTrk.has(k)) delete render[k];
+    }
+  }
+
+  // #rrggbb + alpha -> rgba() 문자열
+  function hexA(hex, a){
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex||"").trim());
+    if(!m){ return `rgba(39,224,200,${a})`; }
+    const n = parseInt(m[1],16);
+    return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
+  }
+
+  function frame(){
+    sweep += 0.02;
+    ctx.clearRect(0,0,cw,ch);
+    const g = geom();
+    if(snap && snap.sensors){ for(const s of snap.sensors) drawSensor(s, g); }
+    if(opt.raw) drawTargets(g);   // 원시(센서별) 점은 토글 ON 일 때만 (아래 레이어)
+    drawTracks(g);                // 융합 점(사람당 하나)은 항상 위에
+    requestAnimationFrame(frame);
+  }
+
+  // ---- 사이드 패널 갱신 ----
+  const modeMap={wifi:"Wi‑Fi",serial:"USB 시리얼",demo:"데모(합성)",disconnected:"연결 끊김"};
+  function fmtStale(ms){ if(ms==null) return "--";
+    return ms<1500 ? "방금" : (ms/1000).toFixed(1)+"s 전"; }
+  function esc(s){ return String(s==null?"":s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+  function updatePanel(){
+    if(!snap) return;
+    const sensors = snap.sensors || [];
+    // 주 인원수 = track_count(융합 실제 인원). present_total 은 원시 합계로 작게 병기.
+    document.getElementById("presentCount").textContent = snap.track_count ?? 0;
+    document.getElementById("rawTotal").textContent = `${snap.present_total ?? 0} 명`;
+    const connCnt = sensors.filter(s=>s.connected).length;
+    document.getElementById("sensorCount").textContent =
+      `센서 ${snap.sensor_count ?? sensors.length}개 · 연결 ${connCnt}`;
+    document.getElementById("connDot").classList.toggle("on", !!snap.connected);
+    document.getElementById("modeText").textContent =
+      (snap.connected?"● ":"○ ")+`센서 ${sensors.length}개 (연결 ${connCnt})`;
+
+    // 추적 중인 사람(융합 트랙) 카드 — confirmed 만. 색스와치+#id+위치+속력+n_sensors센서.
+    const tracks = (snap.tracks || []).filter(t => t.confirmed);
+    document.getElementById("trackList").innerHTML = `
+      <div class="card">
+        <h3>추적 중인 사람 (TRACKS)</h3>
+        ${tracks.map(t => {
+          const col = t.color || "#4ea3ff";
+          return `
+          <div class="tcard present" style="border-color:${col}${t.coasting?';opacity:.6':''}">
+            <div class="top">
+              <span class="name"><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${col};margin-right:6px;vertical-align:middle"></span>#${t.id}</span>
+              <span class="pill ${t.coasting?'':'on'}">${t.coasting?'예측중(가림)':'추적중'}</span></div>
+            <div class="grid2">
+              <div class="kv"><span class="k">X</span><span class="v">${t.x.toFixed(0)} mm</span></div>
+              <div class="kv"><span class="k">Y</span><span class="v">${t.y.toFixed(0)} mm</span></div>
+              <div class="kv"><span class="k">속력</span><span class="v">${t.speed.toFixed(2)} m/s</span></div>
+              <div class="kv"><span class="k">기여센서</span><span class="v">${t.n_sensors}센서</span></div>
+            </div>
+          </div>`;
+        }).join("") || `<div class="kv"><span class="k">추적 중인 사람 없음</span><span class="v">--</span></div>`}
+      </div>`;
+
+    // 센서별 카드 목록
+    const host = document.getElementById("sensorList");
+    host.innerHTML = sensors.map((s, si) => {
+      const col = s.color || "#27e0c8";
+      const lux = (s.illuminance!=null) ? `${s.illuminance.toFixed(0)} lx` : "--";
+      const rate = (s.stats && s.stats.line_rate!=null) ? s.stats.line_rate : 0;
+      const zones = s.zones || {};
+      const zoneStr = Object.keys(zones).length
+        ? Object.entries(zones).map(([k,v])=>`Z${k}:${Math.round(v)}`).join("  ") : "--";
+      const tRows = (s.targets||[]).map(t => `
+        <div class="tcard ${t.present?'present':''}" style="border-color:${t.present?col:'var(--line)'}">
+          <div class="top"><span class="name">S${si+1}·T${t.id}</span>
+            <span class="pill ${t.present?'on':''}">${t.present?'감지됨':'없음'}</span></div>
+          <div class="grid2">
+            <div class="kv"><span class="k">X</span><span class="v">${t.x.toFixed(0)} mm</span></div>
+            <div class="kv"><span class="k">Y</span><span class="v">${t.y.toFixed(0)} mm</span></div>
+            <div class="kv"><span class="k">거리</span><span class="v">${(t.distance/1000).toFixed(2)} m</span></div>
+            <div class="kv"><span class="k">속도</span><span class="v">${t.speed.toFixed(2)} m/s</span></div>
+          </div>
+        </div>`).join("");
+      return `
+        <div class="card scard">
+          <h3><span class="swatch" style="background:${col}"></span>
+            <span class="snm">${esc(s.name)}</span>
+            <span class="pill ${s.connected?'on':''}">${s.connected?(modeMap[s.mode]||s.mode):'끊김'}</span></h3>
+          <div class="grid2">
+            <div class="kv"><span class="k">감지 인원</span><span class="v" style="color:${col}">${s.present_count}</span></div>
+            <div class="kv"><span class="k">수신율</span><span class="v">${rate} /s</span></div>
+            <div class="kv"><span class="k">조도</span><span class="v">${lux}</span></div>
+            <div class="kv"><span class="k">Zone</span><span class="v">${zoneStr}</span></div>
+          </div>
+          <div class="kv"><span class="k">주소</span><span class="v" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.port||s.host||'--')}</span></div>
+          ${tRows}
+        </div>`;
+    }).join("") || `<div class="card"><div class="kv"><span class="k">센서 없음</span><span class="v">--</span></div></div>`;
+
+    // 하단 범례: 센서 색상별
+    document.getElementById("legend").innerHTML = sensors.map(s =>
+      `<span class="lg"><span class="sw" style="background:${s.color||'#27e0c8'}"></span>${esc(s.name)}</span>`
+    ).join("") || `<span class="lg" style="color:var(--muted)">센서 대기 중…</span>`;
+  }
+
+  // ---- SSE 수신 ----
+  function connect(){
+    // ?shot=1 : 헤드리스 스크린샷용 1회 스냅샷 모드 (SSE 미사용 → 네트워크 idle)
+    if(new URLSearchParams(location.search).has("shot")){
+      fetch("/state").then(r=>r.json()).then(d=>{snap=d;updatePanel();}).catch(()=>{});
+      return;
+    }
+    const es = new EventSource("/events");
+    es.onmessage = (e)=>{ try{ snap=JSON.parse(e.data); updatePanel(); }catch(_){} };
+    es.onerror = ()=>{ document.getElementById("connDot").classList.remove("on");
+      document.getElementById("modeText").textContent="○ 서버 재연결 중…"; };
+  }
+
+  // 시계
+  setInterval(()=>{ const d=new Date();
+    document.getElementById("clock").textContent=d.toLocaleTimeString("ko-KR");
+  },1000);
+
+  resize(); connect(); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

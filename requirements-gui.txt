@@ -1,0 +1,5 @@
+# 네이티브 GUI(gui_qt.py) 전용 추가 의존성
+# (웹 버전만 쓸 경우에는 필요 없음 — requirements.txt 의 pyserial 만으로 동작)
+PySide6>=6.6
+pyqtgraph>=0.13
+numpy>=1.24
