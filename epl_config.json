@@ -1,12 +1,12 @@
 {
   "_note": "x,y=방 좌표계 Sensor 위치(mm). heading_deg=Yaw(좌우 설치각, +Y축서 반시계°→동서남북 방향), pitch_deg=Pitch(상하 설치각°→전방 스케일 1/cos), roll_deg=Roll(기울어짐°→좌우 스케일 1/cos), flip=좌우반전. 아래는 임의 시작값 — ./run_auto_positioning.sh 로 자동 캘리브레이션됨. FOV 120°/range 6m 는 하드웨어 고정값이라 여기 없음.",
   "ssid": "RAK",
-  "discovery": true,
+  "discovery": false,
   "sensors": [
     {
       "id": "98bd80",
       "mac": "A4:F0:0F:98:BD:80",
-      "host": "everything-presence-lite-98bd80.local",
+      "host": "10.201.31.120",
       "node_name": "everything-presence-lite-98bd80",
       "name": "Sensor 1",
       "x": 0.0,
@@ -22,7 +22,7 @@
     {
       "id": "bc0e00",
       "mac": "20:E7:C8:BC:0E:00",
-      "host": "everything-presence-lite-bc0e00.local",
+      "host": "10.201.31.153",
       "node_name": "everything-presence-lite-bc0e00",
       "name": "Sensor 2",
       "x": -4934.0,
@@ -38,7 +38,7 @@
     {
       "id": "b9a07c",
       "mac": "00:70:07:B9:A0:7C",
-      "host": "everything-presence-lite-b9a07c.local",
+      "host": "10.201.31.76",
       "node_name": "everything-presence-lite-b9a07c",
       "name": "Sensor 3",
       "x": -3211.3,
