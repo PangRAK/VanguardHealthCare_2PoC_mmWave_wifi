@@ -275,9 +275,13 @@ def _host_to_spec(host: str, index: int) -> dict:
 
 
 def _spec_key(s: dict) -> str:
-    """중복 판정용 키(node_name 우선, 없으면 host)."""
-    base = (s.get("node_name") or s.get("host") or s.get("id") or "")
-    return base.split(".", 1)[0].lower()
+    """중복 판정용 키(node_name 우선, 없으면 host).
+
+    ★ 첫 점에서 자르지 않는다 — IP 호스트가 첫 옥텟으로 뭉개지면 같은 대역 센서들이
+      한 키로 겹쳐 조용히 버려진다(3대 등록 → 1대만 남는 사고)."""
+    from epl_config import strip_dns_suffix
+    base = (s.get("node_name") or s.get("host") or s.get("id") or "").strip().lower()
+    return strip_dns_suffix(base)
 
 
 def build_sources(hub, *, demo: bool = False, hosts: Optional[list] = None,
@@ -294,7 +298,8 @@ def build_sources(hub, *, demo: bool = False, hosts: Optional[list] = None,
     각 worker 는 hub.add_sensor() 로 만든 SensorState 에 데이터를 채운다.
     server.py / gui_qt.py / cli_monitor.py 가 공통으로 사용한다."""
     from mmwave_reader import DemoSensorThread       # 지연 import (순환 방지)
-    from epl_config import load_config, get_sensors, normalize_sensor, DEFAULT_PALETTE
+    from epl_config import (load_config, get_sensors, normalize_sensor, DEFAULT_PALETTE,
+                            assert_unique_sensor_ids)
 
     workers = []
 
@@ -324,11 +329,16 @@ def build_sources(hub, *, demo: bool = False, hosts: Optional[list] = None,
             by_key[_spec_key(s)] = s
         use_disc = cfg.get("discovery", True) if discover is None else discover
         if use_disc:
+            known_ids = {s["id"] for s in by_key.values()}
             for f in discover_sensors():
                 k = _spec_key(f)
-                if k not in by_key:
-                    by_key[k] = normalize_sensor(
-                        {"node_name": f["node_name"], "host": f["host"]}, len(by_key))
+                cand = normalize_sensor({"node_name": f["node_name"], "host": f["host"]},
+                                        len(by_key))
+                # 같은 기기가 설정+탐색으로 두 번 들어오는 경우(키가 달라도 id 가 같다) 건너뛴다
+                if k in by_key or cand["id"] in known_ids:
+                    continue
+                by_key[k] = cand
+                known_ids.add(cand["id"])
         specs = list(by_key.values())
 
     if not specs:
@@ -336,6 +346,9 @@ def build_sources(hub, *, demo: bool = False, hosts: Optional[list] = None,
         print("   먼저 USB로 연결한 뒤  ./run_provision.sh  로 Wi-Fi 연결을 하거나,")
         print("   --host <IP/이름> 으로 직접 지정하세요.  지금은 데모 모드로 표시합니다.")
         return build_sources(hub, demo=True)
+
+    # hub.add_sensor 직전 — 명시 hosts/설정파일/탐색 어느 경로로 왔든 여기서 한 번 막는다.
+    assert_unique_sensor_ids(specs, source="센서 목록")
 
     for s in specs:
         meta = {
