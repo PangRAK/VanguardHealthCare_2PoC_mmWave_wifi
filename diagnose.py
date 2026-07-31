@@ -13,7 +13,7 @@ import argparse
 import socket
 import urllib.request
 
-from epl_config import load_config, get_sensors, CONFIG_PATH
+from epl_config import load_config, get_sensors, CONFIG_PATH, config_error_hint, nonconforming_sensor_ids
 from mmwave_wifi_reader import discover_sensors
 
 
@@ -67,8 +67,14 @@ def collect_targets(cfg, hosts):
         return list(by_key.values())
 
     by_key = {}
-    # 1) 등록 센서(config)
-    for s in get_sensors(cfg):
+    # 1) 등록 센서(config) — 설정 오류면 그 사실을 알리고 mDNS 탐색만이라도 계속한다
+    #    (원인을 찾으려고 돌린 도구가 트레이스백으로 죽으면 안 된다)
+    try:
+        registered = get_sensors(cfg)
+    except ValueError as e:
+        print(config_error_hint(e))
+        registered = []
+    for s in registered:
         key = _dedup_key(s.get("node_name", ""), s.get("host", ""))
         by_key[key] = {
             "name": s.get("name") or s.get("host") or key,
@@ -139,7 +145,14 @@ def main():
     print("===== 1) 저장된 설정 (epl_config.json) =====")
     if cfg:
         print(f"  경로: {CONFIG_PATH}")
-        reg = get_sensors(cfg)
+        try:
+            reg = get_sensors(cfg)
+        except ValueError as e:
+            reg = []
+            print(config_error_hint(e))
+            bad = nonconforming_sensor_ids(cfg)
+            if bad:
+                print(f"  id 규격 위반: {', '.join(bad)}")
         print(f"  등록 센서: {len(reg)}개")
         for s in reg:
             print(f"    - {s.get('name')} ({s.get('host') or s.get('node_name')})")

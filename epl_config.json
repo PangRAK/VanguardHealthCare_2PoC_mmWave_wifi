@@ -1,5 +1,6 @@
 {
-  "_note": "x,y=방 좌표계 Sensor 위치(mm). heading_deg=Yaw(좌우 설치각, +Y축서 반시계°→동서남북 방향), pitch_deg=Pitch(상하 설치각°→전방 스케일 1/cos), roll_deg=Roll(기울어짐°→좌우 스케일 1/cos), flip=좌우반전. 아래는 임의 시작값 — ./run_auto_positioning.sh 로 자동 캘리브레이션됨. FOV 120°/range 6m 는 하드웨어 고정값이라 여기 없음. rooms=방(stream)→센서 매핑: 한 센서는 한 방에만 넣을 것(두 방에 걸치면 같은 사람을 두 방이 각각 재실로 셈). 방 이름은 백엔드가 AddStreamModel 최상위 room 으로 내려주는 값과 같아야 함(방이 한 곳만 정의돼 있으면 그 방으로 폴백+warning). 방을 나누면 x/y/heading 은 방마다 별도 좌표계이므로 PoC 도구 ./run_auto_positioning_v2.sh --room <방> 을 방별로 실행.",
+  "_note": "x,y=방 좌표계 Sensor 위치(mm). heading_deg=Yaw(좌우 설치각, +Y축서 반시계°→동서남북 방향), pitch_deg=Pitch(상하 설치각°→전방 스케일 1/cos), roll_deg=Roll(기울어짐°→좌우 스케일 1/cos), flip=좌우반전. 아래는 임의 시작값 — ./run_auto_positioning.sh 로 자동 캘리브레이션됨. FOV 120°/range 6m 는 하드웨어 고정값이라 여기 없음.",
+  "_sensor_id": "센서 id = '{organization}-{cameraId}-{sensorId}' (예: 'pia-1-1'). 같은 cameraId 를 쓰는 센서들이 한 카메라(=제품의 스트림 하나)에 묶인다. organization/cameraId 는 백엔드 AddStreamModel 등록값과 같아야 하며, 다르면 그 스트림은 센서 0개가 된다(폴백 없음). organization/cameraId 파트에는 '-' 를 쓸 수 없고 sensorId 파트에는 쓸 수 있다. sensorId 는 순번일 뿐 순서에 의미가 없어 바꿔도 되지만 파일 안에서 유일해야 한다(겹치면 융합 입력의 sid 가 겹쳐 재실 인원이 조용히 틀어진다). 물리 센서 대조는 mac 으로 한다. 카메라를 나누면 x/y/heading 은 카메라마다 별도의 방 좌표계이므로 카메라마다 ./run_auto_positioning_v2.sh --camera-id <id> 를 따로 돌려야 한다. 옛 'rooms' 필드와 센서별 'room' 태그는 폐기됐다(있으면 제품이 스트림 등록을 거절).",
   "ssid": "RAK",
   "discovery": false,
   "sensors": [

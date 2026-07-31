@@ -16,7 +16,7 @@ import socket
 import threading
 import time
 
-from epl_config import get_sensors
+from epl_config import get_sensors, config_error_hint
 
 API_PORT = 6053
 TIMEOUT = 1.5   # 센서당 접속 타임아웃(초)
@@ -50,7 +50,12 @@ def main() -> int:
     if args.host:
         targets = [(h, h) for h in args.host]
     else:
-        for s in get_sensors():
+        try:
+            registered = get_sensors()
+        except ValueError as e:
+            print(config_error_hint(e))
+            return 2
+        for s in registered:
             targets.append((s["name"], s["host"]))
         if args.discover:
             from mmwave_wifi_reader import discover_sensors

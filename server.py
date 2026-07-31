@@ -119,9 +119,14 @@ def main():
 
     HUB = SensorHub()
     apply_fusion_opts(HUB, args)
-    workers, mode_desc = build_sources(
-        HUB, demo=args.demo, hosts=args.host, transport=args.transport,
-        noise_psk=args.noise_psk)
+    try:
+        workers, mode_desc = build_sources(
+            HUB, demo=args.demo, hosts=args.host, transport=args.transport,
+            noise_psk=args.noise_psk)
+    except ValueError as e:                      # 설정 오류(id 규격/중복/옛 rooms)
+        from epl_config import config_error_hint
+        print(config_error_hint(e))
+        return 2
     for w in workers:
         w.start()
 

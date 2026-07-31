@@ -66,7 +66,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "epl_config.json")
 
@@ -93,6 +93,25 @@ def save_config(data: Dict[str, Any], path: str = CONFIG_PATH) -> str:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     return path
+
+
+# ---------------------------------------------------------------- 도구용 가드
+def config_error_hint(exc: Exception) -> str:
+    """설정 오류(ValueError)를 사람이 읽을 안내 문자열로 만든다.
+
+    ★ get_sensors() 는 옛 rooms 스키마 / id 형식 위반 / id 누락 / id·host 중복을 전부
+      ValueError 로 던진다. 진단 도구(diagnose·check_sensors)와 시각화(server·gui_qt·
+      cli_monitor)가 그걸 그대로 흘리면 **원인을 알려주는 도구가 트레이스백으로 죽는다** —
+      정작 그 도구를 돌리는 이유가 원인을 찾는 것인데. 그래서 문자열로 감싸 준다.
+
+    Returns:
+        str: "❌ 센서 설정 오류: …" 형태의 여러 줄 안내.
+    """
+    return (
+        f"❌ 센서 설정 오류: {exc}\n"
+        f"   파일: {CONFIG_PATH}\n"
+        "   → 고친 뒤 다시 실행하세요. (id 규격은 이 파일 상단 [센서 id 규격] 참조)"
+    )
 
 
 # ----------------------------------------------------------------- 정규화 헬퍼
@@ -162,6 +181,9 @@ def parse_sensor_id(sid: str) -> Tuple[str, str, str]:
     않는다. 앞의 두 구분자만 경계로 쓰므로(split maxsplit=2) sensorId 파트에는 '-' 가 남는다
     (host 유래 자동 id '10-201-31-120' 을 그대로 담기 위한 규격이다).
 
+    Returns:
+        Tuple[str, str, str]: (organization, cameraId, sensorId). strip() 만 적용된다.
+
     Raises:
         ValueError: 파트가 3개 미만이거나 빈 파트가 있거나 '__' 를 포함할 때."""
     raw = str(sid or "").strip()
@@ -177,8 +199,13 @@ def parse_sensor_id(sid: str) -> Tuple[str, str, str]:
     return parts[0].strip(), parts[1].strip(), parts[2].strip()
 
 
-def make_sensor_id(organization: Any, camera_id: Any, sensor_id: Any) -> str:
+def make_sensor_id(
+    organization: Union[str, int], camera_id: Union[str, int], sensor_id: Union[str, int]
+) -> str:
     """(organization, cameraId, sensorId) 를 규격 id 문자열로 조립한다.
+
+    Returns:
+        str: 규격 id 문자열.
 
     Raises:
         ValueError: 어떤 파트가 비었거나, organization/cameraId 에 '-' 또는 '__' 가 있을 때."""
@@ -208,7 +235,15 @@ def assert_sensor_id_format(sensors: List[Dict[str, Any]], source: str = "") -> 
       않아 재실 인원이 조용히 줄고, 운영자에게는 '센서가 없습니다' 로만 보인다.
     ※ 3-파트라고 뜻까지 맞는 건 아니다. host 유래 자동 id '10-201-31-120' 은 형식은
       통과하지만 organization 파트가 '10' 이라 실제 스트림('pia')과 대조되지 않는다 →
-      get_sensors_for_camera 의 organization 대조가 최종 안전장치다."""
+      get_sensors_for_camera 의 organization 대조가 최종 안전장치다.
+
+    Args:
+        sensors (List[Dict[str, Any]]): normalize_sensor 를 거친 센서 목록.
+        source (str): 오류 메시지에 표시할 출처.
+
+    Raises:
+        ValueError: 규격을 따르지 않는 id 가 있을 때(위반 목록을 전부 담는다).
+    """
     bad: List[str] = []
     for s in sensors:
         try:
@@ -228,7 +263,11 @@ def assert_no_legacy_schema(cfg: Optional[Dict[str, Any]], source: str = "") -> 
 
     ★ 자동 마이그레이션하지 않는다 — 옛 rooms 를 새 id 로 옮기려면 코드가 센서 id 를
       바꿔야 하는데, id 는 융합 입력의 sid 이자 화면·기록 JSONL 의 센서 식별자다.
-      코드가 조용히 바꾸면 화면과 로그가 실동작과 어긋난다."""
+      코드가 조용히 바꾸면 화면과 로그가 실동작과 어긋난다.
+
+    Raises:
+        ValueError: cfg 에 'rooms' 키가 있거나 센서에 'room' 태그가 남아 있을 때.
+    """
     cfg = cfg or {}
     where = f" ({source})" if source else ""
     if "rooms" in cfg:
@@ -271,14 +310,24 @@ def _pitch_from_legacy(raw: Dict[str, Any]) -> float:
 def normalize_sensor(
     raw: Dict[str, Any],
     index: int = 0,
-    organization: Any = None,
-    camera_id: Any = None,
+    organization: Optional[Union[str, int]] = None,
+    camera_id: Optional[Union[str, int]] = None,
 ) -> Dict[str, Any]:
     """부분 정의된 센서 dict 를 모든 필드가 채워진 형태로 정규화한다.
 
     ★ id 자동 생성은 **호출측이 org/cameraId 를 줄 수 있을 때만** 완전한 3-파트 id 를
       만든다. 설정 파일 경로에는 그 문맥이 없으므로 자동 생성 id 는 3-파트가 되지 못하고
-      assert_sensor_id_format 에서 형식 오류로 걸린다 — 파일에는 id 를 명시해야 한다."""
+      assert_sensor_id_format 에서 형식 오류로 걸린다 — 파일에는 id 를 명시해야 한다.
+
+    Args:
+        raw (Dict[str, Any]): 부분 정의된 센서 dict.
+        index (int): 기본 색상 팔레트 인덱스.
+        organization (Optional[Union[str, int]]): id 자동 생성에 쓸 organization.
+        camera_id (Optional[Union[str, int]]): id 자동 생성에 쓸 cameraId.
+
+    Returns:
+        Dict[str, Any]: 모든 필드가 채워진 센서 dict.
+    """
     raw = dict(raw or {})
     node_name = str(raw.get("node_name") or "").strip()
     host = str(raw.get("host") or "").strip()
@@ -379,7 +428,15 @@ def assert_unique_sensor_hosts(sensors: List[Dict[str, Any]], source: str = "") 
     ★ 옛 assert_one_room_per_sensor 가 막던 사고를 새 규격에서 이어받는다. id 가 카메라를
       인코딩하므로 '한 센서가 두 카메라' 는 이제 **host 중복**으로만 나타난다: 'pia-1-1' 과
       'pia-2-1' 이 같은 host 를 가리키면 두 카메라가 같은 기기에 각각 붙어(TCP 6053 x2),
-      물리적으로 카메라 1 쪽에 있는 사람을 카메라 2 도 재실로 세고 알람이 두 번 나간다."""
+      물리적으로 카메라 1 쪽에 있는 사람을 카메라 2 도 재실로 세고 알람이 두 번 나간다.
+
+    Args:
+        sensors (List[Dict[str, Any]]): normalize_sensor 를 거친 센서 목록.
+        source (str): 오류 메시지에 표시할 출처.
+
+    Raises:
+        ValueError: 한 host 를 두 개 이상의 서로 다른 id 가 가리킬 때.
+    """
     by_host: Dict[str, set] = {}
     for s in sensors:
         host = _norm(s.get("host") or s.get("node_name"))
@@ -406,13 +463,17 @@ def assert_unique_sensor_hosts(sensors: List[Dict[str, Any]], source: str = "") 
 #   id 대신 host/node_name 을 적어도 매칭)도 함께 사라진다: 귀속은 이제 id 에만 있다.
 
 
-def get_camera_ids(cfg: Optional[Dict[str, Any]] = None, organization: Any = None) -> List[str]:
+def get_camera_ids(
+    cfg: Optional[Dict[str, Any]] = None, organization: Optional[Union[str, int]] = None
+) -> List[str]:
     """설정에 등장하는 cameraId 목록(센서 id 등장 순, 중복 제거).
 
     organization 을 주면 그 조직의 카메라만 센다 — 운영자에게 보여줄 목록이라 조직을
     섞으면 안 된다(acme 의 '1' 과 pia 의 '1' 이 같은 '1' 로 뭉개진다).
 
-    빈 목록이면 '이 설정 파일에 (그 조직의) 센서가 없다'는 뜻이다."""
+    Returns:
+        List[str]: cameraId 목록. 빈 목록이면 '이 설정 파일에 (그 조직의) 센서가 없다'는 뜻이다.
+    """
     if cfg is None:
         cfg = load_config()
     want_org = _norm(organization) if organization is not None else None
@@ -430,7 +491,7 @@ def get_camera_ids(cfg: Optional[Dict[str, Any]] = None, organization: Any = Non
 
 
 def get_sensors_for_camera(
-    cfg: Optional[Dict[str, Any]], organization: Any, camera_id: Any
+    cfg: Optional[Dict[str, Any]], organization: Union[str, int], camera_id: Union[str, int]
 ) -> List[Dict[str, Any]]:
     """카메라(=stream) 하나에 묶인 센서 목록.
 
@@ -444,7 +505,20 @@ def get_sensors_for_camera(
     ★ 매칭이 0개여도 **절대 폴백하지 않는다**(전 센서도, 다른 카메라 센서도). 엉뚱한
       카메라의 재실을 보고하면 간호사가 없는 곳으로 출동한다. 빈 목록을 주고 호출측이
       경고/오류를 낸다.
-    ★ organization 대조가 '형식은 맞고 뜻은 틀린' id 를 걸러내는 최종 안전장치다."""
+    ★ organization 대조가 '형식은 맞고 뜻은 틀린' id 를 걸러내는 최종 안전장치다.
+
+    Args:
+        cfg (Optional[Dict[str, Any]]): 설정 dict. None 이면 파일에서 읽는다.
+        organization (Union[str, int]): 스트림의 organization.
+        camera_id (Union[str, int]): 스트림의 cameraId (int 가능).
+
+    Returns:
+        List[Dict[str, Any]]: 그 카메라에 묶인 정규화 센서 목록.
+            매칭 0개면 빈 목록이다(폴백 없음).
+
+    Raises:
+        ValueError: 옛 rooms 스키마 / id 형식 위반 / id 중복 / host 중복 (get_sensors 경유).
+    """
     if cfg is None:
         cfg = load_config()
     want_org = _norm(organization)
@@ -537,7 +611,11 @@ def nonconforming_sensor_ids(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
 
     규격을 벗어난 센서는 어느 카메라에도 붙지 않는다(제품이 등록을 거절한다). 도구가
     프로비저닝 직후 경고로 알리기 위한 헬퍼다.
-    ※ get_sensors() 는 규격 위반을 ValueError 로 던지므로 여기서는 파일을 직접 읽는다."""
+    ※ get_sensors() 는 규격 위반을 ValueError 로 던지므로 여기서는 파일을 직접 읽는다.
+
+    Returns:
+        List[str]: 규격을 벗어난 센서 id 목록(id 가 없는 항목은 host 로 표시).
+    """
     if cfg is None:
         cfg = load_config()
     out: List[str] = []

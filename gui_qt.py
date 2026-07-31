@@ -759,8 +759,13 @@ def main():
 
     hub = SensorHub()
     apply_fusion_opts(hub, args)
-    workers, desc = build_sources(hub, demo=args.demo, hosts=args.host,
-                                  transport=args.transport, noise_psk=args.noise_psk)
+    try:
+        workers, desc = build_sources(hub, demo=args.demo, hosts=args.host,
+                                      transport=args.transport, noise_psk=args.noise_psk)
+    except ValueError as e:                      # 설정 오류(id 규격/중복/옛 rooms)
+        from epl_config import config_error_hint
+        print(config_error_hint(e))
+        return 2
     print(f"Data source: {desc}")
     # 기록은 트래커 설정(apply_fusion_opts)과 센서 등록(build_sources) '후'에 켠다
     # → 헤더에 HP 전체 + 센서 외부보정이 함께 남는다.
