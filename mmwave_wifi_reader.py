@@ -286,13 +286,21 @@ def _spec_key(s: dict) -> str:
 
 def build_sources(hub, *, demo: bool = False, hosts: Optional[list] = None,
                   transport: str = "api", noise_psk: Optional[str] = None,
-                  password: str = "", discover: Optional[bool] = None):
+                  password: str = "", discover: Optional[bool] = None,
+                  specs: Optional[list] = None):
     """여러 센서용 리더 스레드 목록과 설명 문자열을 만든다.
 
     센서 소스 결정 우선순위:
       --demo            → 합성 데이터 센서 3개(오버레이 시연)
+      specs=[{...}]     → 센서 dict 목록(센서 id 접두로 고른 카메라 귀속 결과 등)
       hosts=[...]       → 명시된 주소들만
       그 외             → epl_config.json 의 sensors ∪ mDNS 자동탐색(중복 제거)
+
+    ★ specs 의 None 과 [] 는 다른 뜻이다(제품 build_sources 와 동일 계약):
+      · None → **미지정**. 설정 파일(∪ 자동탐색)에서 찾는다.
+      · []   → **지정됐고 0개**. 그 카메라에 붙일 센서가 없다는 뜻이므로 전 센서/데모로
+               폴백하지 않는다. 폴백하면 남의 카메라 센서(또는 합성 인원)로 캘리브레이션한
+               좌표를 저장하는 사고가 난다.
 
     반환: (workers: list[Thread], desc: str)
     각 worker 는 hub.add_sensor() 로 만든 SensorState 에 데이터를 채운다.
@@ -320,8 +328,12 @@ def build_sources(hub, *, demo: bool = False, hosts: Optional[list] = None,
 
     cfg = load_config()
 
-    # 명시 hosts 가 있으면 그것만, 없으면 config ∪ 자동탐색
-    if hosts:
+    # 명시 specs(카메라 귀속) > 명시 hosts > config ∪ 자동탐색
+    # ★ `specs is not None` — 빈 목록([])은 '센서 0개로 지정됨'이라 폴백 대상이 아니다.
+    explicit_specs = specs is not None
+    if explicit_specs:
+        specs = [normalize_sensor(s, i) for i, s in enumerate(specs)]
+    elif hosts:
         specs = [_host_to_spec(h, i) for i, h in enumerate(hosts)]
     else:
         by_key = {}
@@ -342,6 +354,14 @@ def build_sources(hub, *, demo: bool = False, hosts: Optional[list] = None,
         specs = list(by_key.values())
 
     if not specs:
+        if explicit_specs:
+            # 카메라 귀속 결과가 0개 — 데모(합성 인원)로 폴백하면 가짜 사람으로 캘리브레이션
+            # 하거나 화면에 없는 재실을 그리게 된다. 빈 목록으로 정직하게 돌려준다.
+            print(
+                "⚠  지정된 센서가 0개입니다(센서 id 접두 대조 결과). "
+                "데모로 폴백하지 않습니다."
+            )
+            return [], "NO SENSOR (카메라에 묶인 센서 없음)"
         print("⚠  등록/발견된 센서가 없습니다.")
         print("   먼저 USB로 연결한 뒤  ./run_provision.sh  로 Wi-Fi 연결을 하거나,")
         print("   --host <IP/이름> 으로 직접 지정하세요.  지금은 데모 모드로 표시합니다.")

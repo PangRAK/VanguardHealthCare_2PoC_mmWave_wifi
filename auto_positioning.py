@@ -768,8 +768,15 @@ def _wait_connected(hub, ids, need=2, timeout=40.0):
 
 
 def main() -> int:
+    from epl_config import DEFAULT_CAMERA_ID, DEFAULT_ORGANIZATION
+
     ap = argparse.ArgumentParser(description="다중 센서 자동 포지셔닝(위치 + Yaw·Pitch·Roll)")
     ap.add_argument("--host", nargs="+", default=None)
+    ap.add_argument("--camera-id", default=DEFAULT_CAMERA_ID,
+                    help=f"캘리브레이션할 카메라(stream) 식별자 (기본 {DEFAULT_CAMERA_ID}). "
+                         "빈 문자열이면 카메라 구분 없이 등록된 전 센서를 쓴다.")
+    ap.add_argument("--organization", default=DEFAULT_ORGANIZATION,
+                    help=f"센서 id 의 organization 파트 (기본 {DEFAULT_ORGANIZATION})")
     ap.add_argument("--transport", choices=["api", "web"], default="api")
     ap.add_argument("--noise-psk", default=None)
     ap.add_argument("--seconds", type=float, default=60.0)
@@ -788,11 +795,43 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
+    from epl_config import CONFIG_PATH, get_camera_ids, get_sensors_for_camera, load_config
     from mmwave_reader import SensorHub
     from mmwave_wifi_reader import build_sources
 
+    # 카메라 필터 — x/y/heading 은 '방 좌표계' 값이고 **카메라마다 별도의 방 좌표계**라
+    # 카메라마다 따로 캘리브레이션해야 한다. 다른 카메라 센서를 섞으면 두 좌표계를 하나로
+    # 억지로 맞춘 배치가 저장된다.
+    # ★ 이 파일의 지역변수 `room`(610~717 의 합성기)은 **방 좌표 튜플(mm)** 이라 뜻이 다르다.
+    camera_id = str(args.camera_id or "").strip()
+    organization = str(args.organization or "").strip() or DEFAULT_ORGANIZATION
+    specs = None
+    if args.host:
+        if camera_id:
+            print(f"ℹ️  --host 를 직접 줬으므로 --camera-id '{camera_id}' 필터는 무시합니다.")
+        camera_id = ""
+    elif camera_id:
+        cfg = load_config()
+        try:
+            specs = get_sensors_for_camera(cfg, organization, camera_id)
+        except ValueError as e:      # 옛 rooms 스키마 / id 형식·중복 오류
+            print(f"❌ 센서 설정 오류: {e}")
+            print(f"   파일: {CONFIG_PATH}")
+            return 2
+        if len(specs) < 2:
+            print(f"❌ 카메라 '{organization}-{camera_id}' 에 묶인 센서가 "
+                  f"{len(specs)}개입니다 (최소 2개 필요).")
+            print(f"   설정의 cameraId: {', '.join(get_camera_ids(cfg, organization)) or '(없음)'}"
+                  f"   ·  파일: {CONFIG_PATH}")
+            print("   → ./run_provision.sh 의 CAMERA_ID 로 센서를 등록하거나,"
+                  " epl_config.json 의 센서 \"id\" 접두를 확인하세요.")
+            return 2
+        print(f"🎥 카메라: {organization}-{camera_id}  ·  센서 {len(specs)}개 — "
+              f"{', '.join(s['name'] for s in specs)}")
+
     hub = SensorHub()
-    workers, desc = build_sources(hub, hosts=args.host, transport=args.transport, noise_psk=args.noise_psk)
+    workers, desc = build_sources(hub, hosts=args.host, specs=specs,
+                                  transport=args.transport, noise_psk=args.noise_psk)
     print(f"데이터 소스: {desc}")
     meta_list = hub.sensor_states()
     ids = [m["id"] for m, _ in meta_list]
@@ -846,6 +885,14 @@ def main() -> int:
         print(f"   갱신/추가: {', '.join(names.get(s,s) for s in chg) or '없음'}")
         if info["skipped"]:
             print(f"   유지(미고정): {', '.join(names.get(s,s) for s in info['skipped'])}")
+        if info["added"]:
+            # --host 로 새 센서가 들어오면 id 가 규격을 벗어난다 → 제품이 등록을 거절한다.
+            from epl_config import nonconforming_sensor_ids
+            bad = nonconforming_sensor_ids()
+            if bad:
+                print(f"   ⚠ id 규격을 벗어난 센서: {', '.join(bad)}"
+                      " — 제품이 스트림 등록을 거절합니다."
+                      " \"id\" 를 '{organization}-{cameraId}-{sensorId}' 형식으로 고치세요.")
         print("\n다음: ./run_gui.sh 로 오버레이 확인.")
     else:
         print(f"\n(dry-run) 저장 안 함. 갱신 대상: {', '.join(names.get(s,s) for s in chg) or '없음'}")

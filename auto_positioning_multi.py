@@ -34,7 +34,13 @@ run_auto_positioning.sh(라이브 1회 측정) 와 목적은 같다: 각 센서�
     python auto_positioning_multi.py --gt-logs a.jsonl b.jsonl c.jsonl
     python auto_positioning_multi.py --logs-dir ... --dry-run
     python auto_positioning_multi.py --ref 98bd80
+    python auto_positioning_multi.py --camera-id 7     # 그 카메라 센서만 캘리브레이션(기본 camera1)
     python auto_positioning_multi.py --selftest        # 합성 다중로그로 검증(하드웨어/파일 불필요)
+
+★ 카메라마다 따로 돌려야 한다 — x/y/heading 은 '방 좌표계' 값이고 **카메라마다 별도의 방
+  좌표계**라, 서로 다른 카메라의 센서를 한 번에 풀링하면 두 좌표계를 억지로 하나에 맞춘
+  배치가 저장된다. --camera-id 는 로그 헤더의 센서 중 id 접두가 그 카메라를 가리키는 것만
+  남긴다(로그가 섞여 있어도 안전).
 """
 from __future__ import annotations
 
@@ -54,6 +60,10 @@ except ImportError:  # pragma: no cover
 # 추정 파이프라인 전체를 재사용(라이브판과 100% 동일 알고리즘)
 from auto_positioning import (
     resample_to_frames, estimate_positions, apply_to_config, print_report,
+)
+from epl_config import (
+    CONFIG_PATH, DEFAULT_CAMERA_ID, DEFAULT_ORGANIZATION, get_camera_ids,
+    get_sensors_for_camera, load_config,
 )
 
 
@@ -116,11 +126,15 @@ def series_from_records(records, ids):
     return series
 
 
-def collect_frames_from_logs(paths, *, hz=15.0, max_gap_ms=700.0, verbose=True):
+def collect_frames_from_logs(paths, *, hz=15.0, max_gap_ms=700.0, verbose=True, only_ids=None):
     """로그 N개 → (all_frames, ids, names, sensors_meta, per_log_info).
 
     각 로그를 개별적으로 프레임화(resample_to_frames)한 뒤 프레임 리스트를 이어붙인다.
-    프레임은 각자 '한 시점의 동시관측 스냅샷'이라 로그 간 시각 불일치와 무관하게 풀링 가능."""
+    프레임은 각자 '한 시점의 동시관측 스냅샷'이라 로그 간 시각 불일치와 무관하게 풀링 가능.
+
+    only_ids: 이 센서 id 집합만 사용한다(카메라 필터). None 이면 로그에 나온 전 센서.
+      로그에 다른 카메라 센서가 섞여 있어도 여기서 걸러지므로, 서로 다른 방 좌표계가
+      섞이지 않는다."""
     loaded = []
     for p in paths:
         try:
@@ -133,24 +147,40 @@ def collect_frames_from_logs(paths, *, hz=15.0, max_gap_ms=700.0, verbose=True):
             continue
         loaded.append((p, header, records))
 
+    def _in_camera(sid):
+        return only_ids is None or sid in only_ids
+
     # 센서 id 합집합(첫 등장 순) + 이름/메타 — 고정 배치 전제라 로그마다 같아야 정상
-    ids, names, sensors_meta = [], {}, {}
+    ids, names, sensors_meta, excluded = [], {}, {}, []
     for _p, header, _r in loaded:
         for s in header.get("sensors", []):
             sid = s.get("id")
             if sid is None:
+                continue
+            if not _in_camera(sid):
+                if sid not in excluded:
+                    excluded.append(sid)
                 continue
             if sid not in ids:
                 ids.append(sid)
             names.setdefault(sid, s.get("name") or sid)
             sensors_meta.setdefault(sid, {"name": s.get("name", ""), "host": "",
                                           "node_name": "", "color": ""})
+    if excluded and verbose:
+        print(f"  ℹ  다른 카메라 센서 {len(excluded)}개 제외: {', '.join(excluded)}")
 
-    # 로그별 센서 구성이 기준과 다르면 경고(센서를 옮겼거나 다른 방 로그 섞임 의심)
+    # 로그별 센서 구성이 기준과 다르면 경고(센서를 옮겼거나 다른 카메라 로그 섞임 의심)
     base_set = None
     all_frames, per_log = [], []
     for p, header, records in loaded:
-        log_ids = [s.get("id") for s in header.get("sensors", []) if s.get("id") is not None]
+        log_ids = [s.get("id") for s in header.get("sensors", [])
+                   if s.get("id") is not None and _in_camera(s.get("id"))]
+        if not log_ids:
+            # 다른 카메라 센서만 담긴 로그다 — 기준집합으로 삼으면 이후 로그가 전부 '불일치'로
+            # 헛경고를 낸다. 표본 0으로 지나가되 무엇을 건너뛰는지 알린다.
+            if verbose:
+                print(f"  ℹ  {os.path.basename(p)}: 이 카메라 센서가 없어 건너뜁니다")
+            continue
         if base_set is None:
             base_set = set(log_ids)
         elif set(log_ids) != base_set:
@@ -322,11 +352,60 @@ def main() -> int:
     ap.add_argument("--ref", default=None, help="기준센서 id(수평 설치로 아는 센서). 미지정 시 자동선택.")
     ap.add_argument("--no-refine", action="store_true", help="번들조정 생략(쌍 affine 만)")
     ap.add_argument("--dry-run", action="store_true", help="계산만, epl_config.json 저장 안 함")
+    ap.add_argument("--camera-id", default=DEFAULT_CAMERA_ID,
+                    help=f"캘리브레이션할 카메라(stream) 식별자 (기본 {DEFAULT_CAMERA_ID}). "
+                         "빈 문자열이면 카메라 구분 없이 로그의 전 센서를 쓴다.")
+    ap.add_argument("--organization", default=DEFAULT_ORGANIZATION,
+                    help=f"센서 id 의 organization 파트 (기본 {DEFAULT_ORGANIZATION})")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
     if args.selftest:
         return selftest()
+
+    # 카메라 필터 — 서로 다른 방 좌표계가 섞이지 않게 그 카메라 센서만 남긴다.
+    # ★ 아래 지역변수 camera_id 는 '그룹 키' 다. 이 파일의 다른 곳(_synth_local 계열)에 있는
+    #   지역변수 `room` 은 **방 좌표 튜플(mm)** 이므로 이름이 겹치지 않게 구분해 둔다.
+    camera_id = str(args.camera_id or "").strip()
+    organization = str(args.organization or "").strip() or DEFAULT_ORGANIZATION
+    only_ids = None
+    if not camera_id:
+        # ★ 카메라를 지정하지 않으면 로그의 전 센서를 한 좌표계로 맞춘다. 설정에 카메라가
+        #   2개 이상이면 그건 **다른 카메라의 캘리브레이션을 덮어쓰는** 것이므로 거절한다
+        #   (경고만 하면 그 방 좌표가 조용히 망가져 재실 판정이 어긋난다).
+        try:
+            defined = get_camera_ids(load_config())
+        except ValueError as e:
+            print(f"❌ 센서 설정 오류: {e}")
+            print(f"   파일: {CONFIG_PATH}")
+            return 2
+        if len(defined) > 1:
+            print(f"❌ 설정에 카메라가 {len(defined)}개({', '.join(defined)}) 인데 카메라를 지정하지 "
+                  "않았습니다.")
+            print("   카메라마다 별도의 방 좌표계라 한 번에 캘리브레이션하면 다른 카메라의"
+                  " 방 좌표를 덮어씁니다.")
+            print("   → --camera-id <id> 또는 스크립트의 CAMERA_ID 를 지정해 카메라마다"
+                  " 따로 실행하세요.")
+            return 2
+    if camera_id:
+        cfg = load_config()
+        try:
+            camera_sensors = get_sensors_for_camera(cfg, organization, camera_id)
+        except ValueError as e:      # 옛 rooms 스키마 / id 형식·중복 오류
+            print(f"❌ 센서 설정 오류: {e}")
+            print(f"   파일: {CONFIG_PATH}")
+            return 2
+        if len(camera_sensors) < 2:
+            print(f"❌ 카메라 '{organization}-{camera_id}' 에 묶인 센서가 "
+                  f"{len(camera_sensors)}개입니다 (최소 2개 필요).")
+            print(f"   설정의 cameraId: {', '.join(get_camera_ids(cfg, organization)) or '(없음)'}"
+                  f"   ·  파일: {CONFIG_PATH}")
+            print("   → ./run_provision.sh 의 CAMERA_ID 로 센서를 등록하거나,"
+                  " epl_config.json 의 센서 \"id\" 접두를 확인하세요.")
+            return 2
+        only_ids = {s["id"] for s in camera_sensors}
+        print(f"🎥 카메라: {organization}-{camera_id}  ·  센서 {len(camera_sensors)}개 — "
+              f"{', '.join(s['name'] for s in camera_sensors)}")
 
     paths = _resolve_paths(args)
     if not paths:
@@ -341,10 +420,24 @@ def main() -> int:
 
     print(f"[multi-apos] 로그 {len(paths)}개 풀링:")
     frames, ids, names, sensors_meta, per_log = collect_frames_from_logs(
-        paths, hz=args.hz, max_gap_ms=args.max_gap_ms)
+        paths, hz=args.hz, max_gap_ms=args.max_gap_ms, only_ids=only_ids)
     if len(ids) < 2:
         print(f"❌ 최소 2개 센서 필요(로그 헤더에서 발견: {len(ids)}개)")
+        if only_ids:
+            print(f"   카메라 '{camera_id}' 센서: {', '.join(sorted(only_ids))}"
+                  " — 이 센서들이 담긴 로그가 필요합니다(다른 카메라 로그를 지정했는지 확인).")
         return 2
+    if only_ids:
+        # ★ 그 카메라 센서 일부만 로그에 있으면, 저장되는 좌표계는 '로그에 있는 센서들'
+        #   기준이다. 빠진 센서는 옛 좌표계 값을 유지하므로 같은 방 안에서 좌표계가 섞인다
+        #   → 융합이 어긋난다. 조용히 두지 않고 명시적으로 알린다.
+        missing = sorted(only_ids - set(ids))
+        if missing:
+            print(f"  ⚠  카메라 '{camera_id}' 센서 중 {len(missing)}개가 로그에 없습니다: "
+                  f"{', '.join(missing)}")
+            print("     이 센서들의 x/y/heading 은 예전 값으로 남습니다 → 같은 방 안에서 "
+                  "좌표계가 어긋날 수 있습니다.")
+            print("     그 카메라 센서 전부가 함께 기록된 로그로 다시 돌리는 것을 권합니다.")
     print(f"  → 총 프레임(pool): {len(frames)}  ·  센서 {len(ids)}개")
 
     result = estimate_positions(frames, ids, min_overlap=args.min_overlap,
@@ -363,7 +456,6 @@ def main() -> int:
     # 등록된' 센서는 주소를 보존한 채 배치값만 갱신되지만, 등록 안 된 센서를 로그만으로 새로
     # 추가하면 host/node_name 이 비어 get_sensors() 가 걸러내 라이브에서 보이지 않는다(조용한
     # 유실). 그래서 미등록 앵커 센서는 저장에서 제외하고 명확히 경고한다.
-    from epl_config import load_config
     known = {s.get("id") for s in (load_config().get("sensors") or [])}
     orphan = [sid for sid, p in result["placements"].items()
               if p.get("anchored") and sid not in known]

@@ -33,11 +33,16 @@
 - **Native API = TCP 6053**, EPL 기본 펌웨어에서 항상 켜짐, 기본 **무암호**(noise_psk 없음).
 
 ## 3. 센서 3대 (확정값)
-| id | 이름 | **MAC (고정 앵커)** | node_name | 색 | 현재 로컬 IP(가변) |
-|----|------|----------------------|-----------|----|--------------------|
-| 98bd80 | Sensor 1 | `A4:F0:0F:98:BD:80` | everything-presence-lite-98bd80 | #27e0c8 | 10.201.31.120 |
-| bc0e00 | Sensor 2 | `20:E7:C8:BC:0E:00` | everything-presence-lite-bc0e00 | #ffb454 | 10.201.31.153 |
-| b9a07c | Sensor 3 | `00:70:07:B9:A0:7C` | everything-presence-lite-b9a07c | #ff5d8f | 10.201.31.76 |
+| id (규격) | 옛 id | 이름 | **MAC (고정 앵커)** | node_name | 색 | 현재 로컬 IP(가변) |
+|---|---|------|----------------------|-----------|----|--------------------|
+| `pia-1-1` | 98bd80 | Sensor 1 | `A4:F0:0F:98:BD:80` | everything-presence-lite-98bd80 | #27e0c8 | 10.201.31.120 |
+| `pia-1-2` | bc0e00 | Sensor 2 | `20:E7:C8:BC:0E:00` | everything-presence-lite-bc0e00 | #ffb454 | 10.201.31.153 |
+| `pia-1-3` | b9a07c | Sensor 3 | `00:70:07:B9:A0:7C` | everything-presence-lite-b9a07c | #ff5d8f | 10.201.31.76 |
+
+- **id 규격 = `{organization}-{cameraId}-{sensorId}`** (§5.1). 옛 id(MAC 뒤 6자리)는
+  `sensorId` 를 순번으로 바꾸면서 사라졌다 → **물리 센서 대조는 이제 `mac` 이 유일한 단서**다.
+- 2026-07-31 이전에 기록한 JSONL(`raw_*.jsonl`)의 `sid` 는 **옛 id** 다. 재생은 그대로 되지만
+  (`replay_frames` 는 sid 를 불투명 키로만 쓴다) 새 설정과 센서 대조는 되지 않는다.
 - MAC은 **ARP + ESPHome API `device_info` 이중 검증**됨. **IP는 DHCP라 가변**(§4 참고).
 - 프로비저닝 SSID: **`RAK`** (현재 로컬 데모망, 10.201.31.0/24, 단말격리 없음).
 
@@ -53,10 +58,90 @@
 ## 5. 현재 코드/설정 상태
 - `epl_config.json`: 다중 센서, 각 센서 `mac` 등록, **`host`=고정 IP**, **`discovery:false`**(mDNS 끔).
   - mDNS로 되돌리려면 각 host를 `<node_name>.local`로 바꾸면 됨(node_name 보존됨).
+- **카메라 귀속 = 센서 id 접두** (2026-07-31 전환, 옛 `rooms` 필드 폐기). 현재 `pia-1-1/2/3`.
+
+### 5.1 카메라 모델 — 센서 id 가 귀속의 유일한 표현
+- **카메라 1개 = 제품(Product-AI-mono)의 stream 1개 = 융합 좌표계 1개**.
+  `x/y/heading_deg` 는 **방 좌표계** 값이고 카메라마다 별도의 방 좌표계다.
+- 귀속은 **센서 id 하나로만** 표현한다(**PoC 도구와 제품이 동일 로직**):
+
+  ```
+  id = "{organization}-{cameraId}-{sensorId}"        예: "pia-1-1"
+  ```
+
+  · 파싱은 `split("-", 2)` 3파트. `organization`/`cameraId` 파트에는 `-` 불가,
+    **`sensorId` 파트에는 허용**(host 유래 자동 id `10-201-31-120` 수용).
+  · 세 파트 모두 **불투명 문자열**. 숫자로 파싱하지 않고 순서에서 의미를 끌어내지 않는다
+    → `sensorId` 를 바꿔도 유일성만 지키면 동작이 같다.
+  · `organization` 도 함께 대조한다(멀티테넌트에서 다른 조직 센서를 빌리지 않도록).
+    이 대조가 **'형식은 맞고 뜻은 틀린' id 를 걸러내는 최종 안전장치**다 — host 유래
+    `10-201-31-120` 은 3파트를 통과하지만 org 파트가 `10` 이라 아무 카메라에도 안 붙는다.
+  · 매칭 0개면 **빈 목록**(전 센서로도, 남의 카메라 센서로도 폴백하지 않음).
+- **아래는 전부 설정 오류로 즉시 실패**한다(제품이 스트림 등록을 거절):
+  id 형식 위반 / `id` 누락 / id 중복 / **같은 host 를 다른 id 로 두 번** /
+  옛 `rooms` 키·센서 `room` 태그 / `organization`·`cameraId` 에 `-`.
+  · `id` 누락이 오류인 이유: 설정 파일에는 org·cameraId 문맥이 없어 자동 생성 id 가 귀속을
+    담지 못하는데, host 유래 id 는 **형식만은 통과**해서 조용히 아무 카메라에도 안 붙는다.
+  · host 중복이 오류인 이유: 옛 `assert_one_room_per_sensor` 가 막던 사고를 이어받는다 —
+    두 카메라가 같은 기기에 붙으면(TCP 6053 ×2) 같은 사람을 두 번 센다.
+- **옛 `rooms` 스키마는 자동 마이그레이션하지 않는다.** 옮기려면 코드가 센서 id 를 바꿔야
+  하는데, id 는 융합 입력의 `sid` 이자 관제 화면·기록 JSONL 의 센서 식별자다. 코드가
+  조용히 바꾸면 화면·로그가 실동작과 어긋난다.
+- 도구 3종이 `--camera-id`(기본 `camera1`, `epl_config.DEFAULT_CAMERA_ID`)를 받는다:
+
+  | 스크립트 | 설정 변수 | 카메라를 쓰는 방식 |
+  |---|---|---|
+  | `run_provision.sh` | `CAMERA_ID=camera1` | 이번에 연결한 센서의 **id 를 다시 써서** 그 카메라에 귀속 |
+  | `run_auto_positioning.sh` | `CAMERA_ID=camera1` | 그 카메라 센서에만 접속해 측정·저장 |
+  | `run_auto_positioning_v2.sh` | `CAMERA_ID=camera1` | 로그 헤더 센서 중 그 카메라 것만 풀링 |
+
+  세 스크립트 모두 `CAMERA_ID=` (빈 값) → 센서 id 를 안 건드림. CLI `--camera-id` 가 우선.
+- ★★ **`set_sensor_camera()` 는 목록 편집이 아니라 정체성 변경이다.** 카메라를 바꾸면
+  센서 id 가 바뀌고, 그 id 는 융합 입력의 `sid` 이자 기록 JSONL(`header.sensors[].id` /
+  `raw[].sid` / `dets[].sid`)의 센서 식별자다 → **이전 녹화와 대조가 끊긴다.**
+  `provision_wifi.py` 가 바뀐 id 를 출력으로 경고한다.
+- ★ **현장 설치 시 `cameraId` 파트를 병원이 부여한 숫자 cameraId 로 교체해야 한다.**
+  제품의 `AddStreamModel.cameraId` 는 `int` 라 기본값 `camera1` 은 어떤 스트림과도
+  매칭되지 않는다(= 그 스트림은 센서 0개 → 체류 알람이 아예 안 나감).
+- **카메라를 나누면 카메라마다 따로** `./run_auto_positioning_v2.sh --camera-id <id>` 를
+  돌려야 한다(한 번에 돌리면 서로 다른 방 좌표계를 억지로 하나에 맞춘 배치가 저장된다).
+- ⚠ **시각화·진단 도구는 아직 카메라를 모른다** (`server.py` / `gui_qt.py` / `cli_monitor.py` /
+  `diagnose.py` / `check_sensors.py`). 전 센서를 **한 SensorHub 에** 넣으므로 카메라가 2개면
+  오버레이만 뒤섞이는 게 아니라 **서로 다른 카메라의 두 사람이 한 트랙으로 융합**된다
+  (좌표계가 다른 값을 같은 평면으로 취급 → 거리·병합 판정이 무의미). 카메라를 나눈 뒤에는
+  이 도구들의 화면·인원수를 신뢰하지 말 것 — 제품 경로(카메라별 SensorHub)만 정확하다.
+- ⚠ `run_auto_positioning{,_v2}.sh` 의 `CAMERA_ID=` 를 **비우면** 카메라가 2개 이상인
+  설정에서 **실행이 거부된다** — 여러 카메라 센서를 한 좌표계로 맞춰 저장하면 다른 카메라의
+  캘리브레이션을 덮어쓰기 때문이다. 카메라마다 `--camera-id <id>` 로 따로 돌릴 것.
 - 리더: `mmwave_wifi_reader.py` `WifiApiReader` → `APIClient(host,6053)` + `ReconnectLogic(login=True)` + `subscribe_states`.
   - 접속엔 **`host`만 사용**(IP/이름 무관). `mac`은 참조·resolve 앵커용(리더가 직접 안 씀).
   - `discovery` 플래그는 **자동탐색(browse)만** 제어 — host의 `.local` 조회와는 별개.
 - 파서/융합/시각화 로직은 배포 이관 시 **무변경**(값만 교체).
+
+### 5.2 제품(Product-AI-mono)이 카메라를 정하는 순서
+제품은 **카메라 식별자를 백엔드 등록값에서 받는다** — 추측 계층이 없다.
+`source.resolve_camera_id()` 의 출처는 단 하나다:
+
+```
+user_param["user_param"]["cameraId"]  /  ["organization"]
+   └ 없으면 stream_id("{cameraId}_{organization}")를 첫 '_' 기준 1회 분해해 폴백
+```
+
+- **왜 추측이 필요 없어졌나** — MQ 봉투의 `cameraId` 는
+  `DTO/output_handler.make_alarm_message` 가 그 등록값을 **그대로** 싣는다. 즉 같은 값으로
+  센서를 고르면 "센서가 본 사람"과 "알람이 가리키는 카메라"가 정의상 일치한다.
+- `cameraUrl` / `room` / `roomId` / `mmwave://` 는 **더 이상 보지 않는다.** 방 이름이라는
+  근거가 없는 부산물이었고, 그걸 추측하던 계층(옛 `resolve_effective_room`)이 조용히 엉뚱한
+  센서를 붙일 수 있는 유일한 통로였다. `cameraUrl` 은 카메라 기준 규약의 필수 필드지만
+  mmWave 스트림에는 대응하는 카메라 주소가 없어 빈 문자열이 정상이다.
+- `organization`·`cameraId` 에 `-` 가 있으면 **등록을 거절**한다 — 그 카메라를 가리키는
+  규격 id 를 만들 수 없어 조용히 '센서 0개' 로 떨어지기 때문이다.
+- **한 카메라 = 한 스트림은 구조적으로 보장된다.** `stream_id` 가
+  `{cameraId}_{organization}` 이라 같은 카메라를 가리키는 서로 다른 stream_id 가 존재할 수
+  없다 → 옛 claim 충돌 검사는 삭제했다(같은 stream_id 재등록은 '교체').
+- 알람 키는 레포 표준 `{stream_id}__{category}` 를 유지한다(백엔드가 stream_id 로 대조).
+  카메라↔스트림이 1:1 이라 그게 곧 카메라 단위 알람이다.
+  ※ 그래서 센서 id 에 `__` 를 금지한다 — 끼면 카테고리 추출이 깨져 알람이 통째로 사라진다.
 
 ## 6. 로컬 테스트 vs 실제 배포 (같은 코드, host 값만 다름)
 | | 로컬 테스트 | 실제 배포(병원) |
@@ -100,6 +185,27 @@
 - [ ] `run_provision.sh`: 프로비저닝 직후 **센서 IP 자동 캡처 → config `host` 기록** (R3)
 - [ ] 병실 공유기 **DHCP 예약**(또는 firmware static IP)로 센서 IP 고정 (R2)
 - [ ] 서버실 ↔ 병실 **서브넷 라우팅 + TCP 6053 방화벽** 확인 (R4, IT)
+- [ ] **[센서 id 규격 후속 · 배포 게이트]** `rooms` 폐기 → id 규격화(2026-07-31)에 딸린 것들:
+  - [x] **제품·PoC 동시 전환 완료** — `parse_sensor_id`/`make_sensor_id`/
+        `assert_sensor_id_format`/`assert_no_legacy_schema`/`assert_unique_sensor_hosts`/
+        `get_camera_ids`/`get_sensors_for_camera` 를 양쪽에 넣고, 카메라 해석을
+        `source.resolve_camera_id()` 단일 경로로 통합했다(§5.1·§5.2).
+  - [ ] **★ HF(`PIA-SPACE-LAB/SensorData`)의 `epl_config.json` 을 새 id 규격으로 교체**
+        — 제품 `assets/` 는 **git 무시 대상**(`.gitignore:73`)이라 HF 가 유일한 배포
+        경로다. 교체 전까지 다른 머신/CI 는 옛 `rooms` 파일을 받아 **스트림 등록이
+        ValueError 로 거절**되고, 실자산 테스트 2개
+        (`test_real_epl_config` / `test_real_epl_config_ids_conform`)는 fail 이 아니라
+        **명시적 skip** 으로 그 사실을 알린다. 올릴 파일은 이 레포의 `epl_config.json`
+        과 같은 내용(`pia-1-1/2/3`)이다.
+  - [ ] **현장 설치 시 `cameraId` 파트를 병원 실제 숫자 cameraId 로 교체** — 제품의
+        `AddStreamModel.cameraId` 는 `int` 라 기본값 `camera1` 은 매칭되지 않는다.
+        `./run_provision.sh` 의 `CAMERA_ID` 또는 `--camera-id <숫자>`.
+  - [ ] **백엔드가 `cameraId`/`organization` 을 정확히 내려주는지 확인** — 이제 이 둘이
+        카메라 식별의 **단일 출처**다(`cameraUrl`/`room`/`roomId` 는 읽지 않는다).
+        없으면 `stream_id`(`{cameraId}_{organization}`) 분해로 폴백한다.
+  - [ ] 시각화·진단 5개 도구에 `--camera-id` 도입(§5.1 마지막 ⚠ — 카메라 2개면 트랙이 융합된다)
+  - [ ] `organization` 에 `-` 가 들어가는 테넌트가 생기면 규격을 다시 봐야 한다 — 지금은
+        그런 스트림을 **등록 거절**한다(그 카메라를 가리키는 id 를 만들 수 없으므로).
 
 ---
 
@@ -111,6 +217,15 @@
 2. Mac을 **병실 Wi-Fi에 연결**.
 3. **센서를 Mac에 USB 연결**.
 4. `./run_provision.sh --ssid <병실SSID> --password <PW>` → 센서를 병실 Wi-Fi에 등록.
+   - **[카메라 배정] 스크립트의 `CAMERA_ID`**(기본 `camera1`)가 이 센서가 귀속될 카메라다.
+     ★ 현장에서는 **병원이 부여한 숫자 cameraId** 로 바꿔야 한다(제품의 `cameraId` 는 int).
+     카메라가 여러 개면 그 카메라 센서를 다 끝낸 뒤 `CAMERA_ID` 를 바꿔 다음 카메라 센서를
+     프로비저닝한다(또는 이번만 `--camera-id 8`). 출력의 `카메라: pia-7 · 이 카메라 센서 N개`
+     로 확인.
+   - ★★ 이때 **센서 id 자체가 다시 쓰인다**(`pia-1-1` → `pia-7-1`). id 는 융합 입력의 `sid`
+     이자 기록 JSONL 의 센서 식별자라 **이전 녹화와 대조가 끊긴다** — 스크립트가 바뀐 id 를
+     경고로 출력하니 반드시 확인할 것.
+   - "id 규격을 벗어난 센서" 경고가 뜨면 그 센서는 **제품이 스트림 등록을 거절한다** → 반드시 수정.
 5. **[중요·R3] 프로비저닝 직후 같은 서브넷에서 센서의 현재 IP를 캡처**해 `epl_config.json` 의 `host`에 기록.
    - mDNS/ARP가 되는 **유일한 순간**이 지금(같은 서브넷). 서버실 가면 못 함.
    - **[R2] IT가 병실 공유기에 해당 MAC DHCP 예약** → IP 고정(가장 안전).
@@ -148,6 +263,216 @@
 ---
 
 ## [변경 로그]
+
+- **2026-07-31 (`rooms` 폐기 → 센서 id 규격화 `{organization}-{cameraId}-{sensorId}`)**
+  - **왜**: 알람은 기존 레포 컨벤션대로 **카메라 단위**로 발화하고, MQ 봉투의 `cameraId` 는
+    `DTO/output_handler.make_alarm_message` 가 `user_param["user_param"]["cameraId"]` 에서
+    **그대로** 읽는다. 즉 장기체류를 측정하는 공간을 비추는 카메라의 id 로 스트림이
+    등록되면 MQ 는 이미 맞다. 그러면 모듈이 답할 것은 하나뿐이다 — *그 카메라에 묶인
+    센서가 누구인가*. 그 답을 별도 매핑 테이블(`rooms`)이 아니라 **센서 id 자체**에 담아
+    "방 이름을 추측하는 계층"을 통째로 없앴다.
+  - **없어진 것**: `rooms` 필드 · 센서 `room` 태그 · `mmwave://` 스킴(`SENSOR_URL_SCHEME`) ·
+    제품 `resolve_room_id`/`is_room_explicit`/`room_candidates`/`resolve_effective_room` ·
+    양쪽 `_sensor_keys`/`_rooms_of`/`get_room_ids`/`get_sensors_for_room`/
+    `assert_one_room_per_sensor` · `add_stream` 의 '한 방을 두 스트림이 claim' 검사
+    (stream_id 가 `{cameraId}_{organization}` 이라 **구조적으로 불가능**해졌다).
+  - **생긴 것**(양쪽 동일): `parse_sensor_id` / `make_sensor_id` / `assert_sensor_id_format` /
+    `assert_no_legacy_schema` / `assert_unique_sensor_hosts` / `get_camera_ids` /
+    `get_sensors_for_camera`, 제품 `resolve_camera_id`(카메라 해석 단일 경로),
+    PoC `set_sensor_camera`(**센서 id 재작성**) / `nonconforming_sensor_ids` /
+    `DEFAULT_CAMERA_ID`("camera1") / `DEFAULT_ORGANIZATION`("pia").
+    클래스·필드도 개명: `MmwaveRoomSource`→`MmwaveCameraSource`,
+    `MmwaveSourceManager.rooms`→`.streams`, 도구 `--room`→`--camera-id`, `ROOM=`→`CAMERA_ID=`.
+  - **용어 규칙(중요)**: `room` 은 **좌표계 전용**으로 남겼다 — `room_transform`/`sensor_local`/
+    "방 좌표계 mm"/`rx`,`ry` 는 무변경이다. 그룹핑 문맥의 "방"만 "카메라"로 바꿨다.
+    · '카메라 좌표계' 라는 개념은 만들지 않았다(카메라 광학 좌표계와 혼동) —
+      "카메라마다 별도의 방 좌표계" 로 표기한다.
+    · `mmwave_reader.py` / `fusion.py` / `gui_qt.py` / `replay_video.py` / `index.html` 은
+      grouping 히트가 0이라 **무변경**이 정답이었다.
+    · `auto_positioning{,_multi}.py` 의 지역변수 `room` 은 **방 좌표 튜플(mm)** 이다
+      (`room[0]` 을 X 로 인덱싱) → 일괄 치환하면 셀프테스트 합성기가 조용히 깨진다.
+      한글 오탐(방화벽/전방/방침/방지/방어/방향)도 많아 **행 단위 수동 편집**만 했다.
+  - **실패 방침**(전부 ValueError = 스트림 등록 거절): id 형식 위반 / `id` 누락 / id 중복 /
+    **같은 host 를 다른 id 로 두 번** / 옛 `rooms`·`room` 잔재 / `organization`·`cameraId` 에
+    `-`. 매칭 센서 0개만 예외로 error 로그 + 데이터 없음(안전한 축소).
+    · `id` 누락이 오류인 이유: 설정 파일에는 org·cameraId 문맥이 없어 자동 생성 id 가 귀속을
+      담지 못하는데, host 유래 id(`10.0.0.13`→`10-0-0-13`)는 **3파트 형식만은 통과**해
+      조용히 아무 카메라에도 안 붙는다.
+    · host 중복 검사는 삭제한 `assert_one_room_per_sensor` 의 성질을 이어받은 것이다.
+    · `__` 금지: 알람 키가 `{stream_id}__{category}` 라 끼면 카테고리 추출이 깨지고
+      `bases/service_base.py` 의 batch 조회가 IndexError → **그 스트림 알람이 통째로 소실**.
+  - **M1 회귀 방지 재확인**: 설정 검증을 `MmwaveCameraSource.__init__` 으로 되돌렸다.
+    한 번 `start()` 로 밀렸더니 재등록 실패 시 **잘 돌던 스트림이 사라졌다**(테스트가 잡음).
+  - **마이그레이션**: 자동 변환 없음(코드가 센서 id 를 바꾸면 관제 화면·기록과 어긋난다).
+    `epl_config.json` 3대를 `98bd80/bc0e00/b9a07c` → `pia-1-1/2/3` 로 수동 전환했고
+    `rooms` 키를 삭제했다. **옛 녹화 JSONL 의 `sid` 는 옛 id 로 남는다** — 재생은 되지만
+    (`replay_frames` 는 sid 를 불투명 키로 취급) 새 설정과 센서 대조는 안 된다.
+  - **검증**: 제품 **71 passed**(0 failed / 0 skipped, 실자산 포함), black·flake8 clean.
+    현장 로그 3개 리플레이 회귀 **3/3 발화 유지**(peak 116.7 / 117.0 / 94.6s) — 이번 변경은
+    센서 그룹핑만 건드리므로 융합 결과가 바뀌면 안 되는데 실제로 안 바뀌었다.
+    신규 e2e 5종으로 **설정 → 귀속 → 허브 → 융합 → 이벤트 → 알람**을 한 줄로 꿰었고,
+    레포 최초로 `make_alarm_message` MQ 봉투 계약을 테스트로 못박았다
+    (센서 id 의 cameraId 파트 == 스트림 cameraId == MQ `cameraId`).
+  - **남은 게이트**: HF 자산 교체 / 현장 숫자 cameraId 로 교체 / 백엔드가 cameraId·
+    organization 을 내려주는지 확인 (§10).
+- **2026-07-30 (방(room)↔센서 매핑 도입 — 설치 도구 3종 + 설정 파일)**
+  - 왜: 제품은 **방 단위(stream)로 재실/체류를 판정**하는데, `epl_config.json` 에 방 정보가
+    없어 `get_sensors_for_room` 의 3순위 폴백(전 센서)이 걸리고 있었다. 방이 1곳인 지금은
+    무해하지만, 방을 2곳으로 늘리면 **두 방이 같은 센서 3대를 공유해 같은 사람을 각각
+    재실로 세고**, 한 센서에 방 수만큼 TCP 6053 연결이 생긴다. 최상위 `rooms` 매핑
+    (§5.1)을 도입해 막았다.
+  - `epl_config.json`(이 레포 + 제품 `assets/config/`) 에 `"rooms": {"room_1": [98bd80,
+    bc0e00, b9a07c]}` 추가. **현재 배치 그대로 한 방**이라 동작 변화 없음(실측: room_1
+    필터 결과 == 방 구분 없이 돌린 결과, 자동 포지셔닝 출력 diff 0).
+  - `epl_config.py`: `DEFAULT_ROOM="room_1"`, `get_sensors_for_room()`(**제품과 동일 로직**),
+    `set_sensor_room()`(등록/이동·멱등), `get_room_ids()`, `unmapped_sensor_ids()`,
+    `_rooms_of()`(스키마 검증), `normalize_sensor` 에 `room` 필드(제품 파리티).
+  - 도구 3종에 `--room` + 스크립트 `ROOM=room_1`(§5.1 표). `run_provision.sh` 는 센서를
+    그 방에 등록하고, 두 auto_positioning 은 **그 방 센서만** 접속/풀링한다.
+  - `mmwave_wifi_reader.build_sources` 에 `specs=` 추가(제품과 같은 `None`≠`[]` 계약).
+    `specs=[]` 는 **데모 폴백 금지** — 합성 인원으로 캘리브레이션한 좌표가 저장되면 안 된다.
+  - 적대적 리뷰에서 잡아 고친 것 3건:
+    · `set_sensor_room` 이 remove-then-append 라 **재프로비저닝마다 목록 순서가 바뀌던** 문제
+      → 이미 그 방 소속이면 목록을 건드리지 않음(멱등·표기 보존).
+    · 깨진 `rooms`(dict 아님 / `"room_1": "98bd80"` 처럼 대괄호 누락)가 `AttributeError`
+      또는 **조용한 0개**가 되던 문제 → `_rooms_of()` 가 설정 오류로 실패(`assert_unique_
+      sensor_ids` 와 같은 방침). 도구는 `❌ 센서 설정 오류: …` + exit 2.
+    · 방 매핑이 실패하면 **성공한 Wi-Fi 프로비저닝 기록까지 저장되지 않던** 문제
+      → 센서는 먼저 저장하고 매핑 실패만 경고(USB 재작업 불필요).
+  - 검증: 방 로직 100개 체크 PASS(제품 함수와 40케이스 출력 대조 포함),
+    v1/v2 `--selftest` PASS, 실제 로그 3개 `--room room_1 --dry-run` 회귀 0, 제품 52 passed.
+  - ⚠ **배포 게이트는 §10 TODO 참조** — 제품 `assets/` 는 **git 무시 대상**이라 HF 업로드가
+    유일한 배포 경로다.
+- **2026-07-30 (알람 카테고리명 변경: 재실체류 → 장기체류)**
+  - 제품 카테고리를 `재실체류_cv`/`presence_dwell_cv` → **`장기체류_cv`/`long_dwell_cv`** 로 변경.
+  - 레포 규약 확인 후 적용: cvEvent 는 **한글·영문 양쪽에 `_cv` 접미사**(24개 중 21개가 그 형태
+    — `["배회_cv","loitering_cv"]` 식). 그래서 요청받은 `장기체류`/`long_dwell` 에 `_cv` 를 붙였다.
+  - ★ **백엔드와 동시 반영 필요(배포 게이트)**: 이 목록에 없는 name 은 `AddStreamModel` 이
+    `Unknown category name` 으로 **스트림 등록 자체를 거절**한다. 실측 확인:
+    `장기체류_cv`·`long_dwell_cv` 통과 / `재실체류_cv`·`presence_dwell_cv`·`long_dwell`(접미사 없음)
+    ·`장기체류`(접미사 없음) 전부 거절. 구 명칭으로 등록된 스트림이 있으면 재등록해야 한다.
+  - 이 값이 알람 MQ 봉투의 `name` 으로 그대로 나간다(실측: START/END 둘 다 `"장기체류_cv"`,
+    uuid 짝 일치). 한글로 등록하면 한글이, 영문으로 등록하면 영문이 나간다.
+  - 곁들여 `category_name` 을 피어 규약대로 정렬: event=`long_dwell_cv`(등록 카테고리명),
+    service=`long_dwell`(단축형). 예전 값 `vanguard_mmwave`(모듈명)는 규약 이탈이었다.
+    기능 영향 없음 — 알람 키는 `_resolve` 가 user_param 에서 찾은 실제 카테고리명으로 만든다.
+  - 모듈 디렉터리/서비스 클래스(`vanguard_mmwave`/`VanguardMmwaveService`)와 상수명
+    `VANGUARD_MMWAVE_CV_CATEGORY` 는 그대로 뒀다(고객사 접두사 형태는
+    `KUMHO_PROXIMITY_CV_CATEGORY` 선례가 있고, 바꾸면 stream_params.py 까지 번진다).
+- **2026-07-30 (제품 2차 리뷰 — mm ROI 오형 결함 + 벤더링 사문 정리, 실기동 알람 검증)**
+  - ★★ **최대 결함: 방 좌표 mm ROI 좌표가 홀수 개면 전체 알람이 조용히 멈춘다 (수정)**
+    · `polygonCoordinates: List[int]` 라 `AddStreamModel` 검증이 **개수를 막지 못한다**(실측:
+      홀수 7개가 그대로 통과). 런타임 `get_pair_list()` 가 `ValueError: Input list length must
+      be even.` 을 던지고, 이 호출은 `_detect()` 맨 앞이라 `try_except_only_in_prod_mode` 가
+      삼켜 **그 스냅샷 전체가 폐기**된다. ROI 는 매 스냅샷 재등록되므로 매번 같은 곳에서 터진다.
+    · **실측 파급**: 방 2개(room_1 정상 / room_2 홀수)를 같은 페이로드로 돌리면 **정상인
+      room_1 까지 알람 0건**, `_detect` 15프레임에서 멈춤. 흔적은 태그도 stream_id 도 없는
+      bare `print('Input list length must be even.')` 14줄뿐 → 로그로 원인 추적 불가.
+    · ★ **이 레포와 직결되는 이유**: 다른 모듈의 ROI 는 화면 작도 도구가 (x,y) 쌍을
+      보장하지만, 이 모듈의 ROI 는 **사람이 직접 적는 방 좌표 mm** 다(README §4 예시).
+      즉 PoC 에서 캘리브레이션한 mm 좌표를 손으로 옮겨 적는 우리 절차가 곧 이 결함의
+      트리거다. ROI 를 쓰기 시작하면 **좌표 개수를 반드시 짝수로 확인할 것.**
+    · ★★ **단, ROI 는 현 PoC 범위에서 쓰지 않는다(확장성 대비 기능).** 화장실은 "방 하나 =
+      감지 구역 하나" 라 `polygonCoordinates` 를 비운 채 운영하며, 비우면 `polygon=None` 로
+      전 트랙을 통과시켜 이 검증 경로를 한 번도 타지 않는다(실측: `roi` 키 없음/`{}`/`[]`/
+      `None` 네 형태 모두 등록 통과·방 전체 통과·`invalid=False` → **수정 전과 동작 동일**).
+      그래서 이번 수정은 PoC 운영에 영향이 없고, 지금 단계의 튜닝·검토 대상도 아니다.
+      이 사실을 `roi_manager.py` 상단 / `param.py` / README §4 세 곳에 명시해 뒀다.
+    · 수정 2겹: ① `param.py` 에 `validate_metric_polygon` — 짝수·3점 이상이 아니면
+      **등록 거절**(rooms 스키마·센서 id 중복과 같은 방침). ② `roi_manager.add_roi` 안전망 —
+      API 밖 경로의 오형은 `invalid` 로 표시하고 `is_inside`→False 로 **그 방만 격리**한다.
+      '방 전체' 폴백은 하지 않는다(지정하려던 구역 밖 사람까지 세면 엉뚱한 알람).
+      실측 후: 등록 거절 동작 + 오형 방만 억제되고 정상 방 알람 발화, stdout 누출 0줄.
+  - **벤더링 사문·거짓 주석 정리 (수정)**: AST 대조(주석·포맷 제거)로 검사했더니
+    · `mmwave_core/fusion.py` 가 PoC 의 CLI 헬퍼 `resolve_fusion_opts(cfg, **overrides)` 를
+      남겨 뒀는데, 제품에는 **같은 이름의 다른 함수**(`fusion_params.resolve_fusion_opts`)가
+      있었다. 원본 쪽은 `cfg["fusion"]` 만 보고 코드 기본값·`best_params.yaml`·env 를 전혀
+      반영하지 않아, 잘못 임포트하면 융합값이 조용히 전부 기본값으로 돌아가 60초 알람이
+      발화하지 않는다 → 이름 충돌 자체를 제거(헤더의 "CLI 헬퍼 제거" 방침과 일치).
+    · `FUSION_KWARGS` 는 **제품에만 추가된 사문**이고 `config.py` 는 "FUSION_KWARGS 로 검증"
+      이라 적어 뒀지만 실제 검증은 `fusion_params._KINDS` 가 한다 → 심볼 제거 + 주석 정정.
+    · 결과: 벤더링 드리프트에 **제품 전용 추가가 0개**가 되어 남은 차이는 전부 문서화된
+      제거·변경뿐이다. `mmwave_parser.py` 는 정의 100% 동일, `epl_config.py` 의 차이는
+      `[vanguard_mmwave]` 로그 접두사와 `port` 필드뿐(문서와 일치).
+  - ★ **PoC 도 같이 볼 것**: 위 `resolve_fusion_opts` 는 PoC `fusion.py` 에 그대로 있고
+    PoC 의 GUI/CLI 가 실제로 쓴다. PoC 에서 `best_params.yaml` 을 적용하려면 이 함수만으로는
+    부족하다(파일을 읽지 않는다) — `run_gui.sh` 계열이 파일을 어떻게 먹이는지 확인 필요.
+  - **실기동 알람 검증(전용 venv 구축)**: `pytest` **67 passed**(기존 64 + 신규 3).
+    나아가 실제 소비 스레드·`send_alarm`·MQ 봉투까지 관측:
+    · 방 2개 동시 → 방마다 START/END 각 1건, START↔END **uuid 짝 일치**, `thumbnail` 전부 None
+    · ROI 밖 8초 체류 → 0건 / ROI 안 8초 체류 → START 1건
+    · 합성 센서 3대 실제 e2e → 센서 3대 connected, 융합 트랙 2명, 체류 5.3초, 재실 2명, START 1건
+    · 실행 레시피: `PYTHONPATH=packages TEAM=ai` + `PYTHON_RABBITMQ_MAX_RECONNECT_ATTEMPTS=1`
+      `PYTHON_RABBITMQ_SOCKET_TIMEOUT=1` `PYTHON_RABBITMQ_RECONNECT_DELAY=0`
+      (브로커가 없으면 `utils/init.py` 의 RabbitMQ 접속 재시도에서 import 가 멈춘다 —
+       이 3개를 안 주면 테스트가 아니라 **임포트 단계에서 행**이 걸린다)
+    · 필요 패키지: torch·**torchvision**(`pia.vision.preprocessing.resize` 가 요구)·redis·pika·
+      boto3·concurrent-log-handler. 모듈 `requirements.txt` 는 "베이스 이미지의 torch 만 쓴다"
+      고 적고 있어 맞지만, torchvision 도 베이스 전제임을 알아둘 것.
+  - lint: black·flake8(7.1.1 로컬 포함) **모두 clean** — f-string 안 dict 컴프리헨션을 지역
+    변수로 빼 구버전 pycodestyle E201/E202 오탐도 제거.
+- **2026-07-30 (제품 컨벤션 대조 리뷰 — 고유 결함 수정)**
+  - 왜: 제품 `vanguard_mmwave` 를 피어 23개 모듈과 대조해, 발견한 결함 중 **레포 공통(컨벤션이
+    같은 것)** 과 **이 모듈 고유** 를 갈랐다. 고유 결함만 고쳤다.
+  - **레포 공통(모듈 결함 아님 — 플랫폼 과제로 분리)**: 스트림 해제 시 ① 열린 알람이 END 되지
+    않고 ② per-stream 상태가 영구 누적. 근거: `DeleteStreamModel`(`/api/v1/stream/remove` DTO)이
+    **레포 전체에서 참조 0건**, per-stream 정리 메서드를 가진 event.py 는 `vanguard_mmwave`
+    하나뿐(`drop_stream`, 다만 호출자 없음), 피어 4개 모두 `defaultdict` 를 정리 없이 누적.
+    → 이 모듈은 컨벤션을 어긴 게 아니라 오히려 유일하게 해제 API 를 갖고 있다.
+    · 마찬가지로 "기동 시 파라미터 조합 경고가 배포 기본값에서 안 울리는 것" 도 선례가 있다
+      (`ftpe_int8_2stage/service.py`: 게이트가 env 기본 False + 조건도 이미 만족).
+  - **고유 결함 ① 재등록 실패 시 멀쩡한 방이 사라짐 (수정)**: `add_stream` 이 기존 방을 먼저
+    `stop`+`pop` 하고 나서 새 방을 만들었다 → 설정 파일 오타 후 같은 `stream_id` 재등록이라는
+    흔한 절차에서 **잘 돌던 방이 등록에서 사라지고**(`rooms={}` → 생산 페이로드 `None`) 그 방의
+    열린 체류 알람도 END 를 못 냈다. **검증(새 방 생성)을 `self.rooms` 손대기 전으로 이동**,
+    충돌 검사에 `sid != stream_id` 추가(자기 자신은 교체 대상), 교체는 예약 후 `existing.stop()`
+    (순서를 뒤집으면 같은 센서에 리더가 겹쳐 붙어 한 사람이 두 번 세어진다).
+    `AddStreamModel.sensors` 의 id 중복도 `start()` 가 아니라 **생성자**에서 걸러 같은 창을 닫음.
+    → 재현·회귀 17항목 자체 검증 PASS + pytest `test_failed_reregistration_keeps_the_working_room`.
+    ★ 이 함정은 **이 레포에 대응물이 없다**(PoC 는 스트림 등록 개념이 없음) — 참고만.
+  - **고유 결함 ② 문서 숫자 드리프트 (수정)**: 주석이 적은 융합값이 배포 튜닝 파일에 덮여
+    실제와 달랐다. `queue_k/size` **5-of-10 → 코드 기본 3-of-5 / 튜닝 파일 7-of-7**(3곳),
+    `WINDOW` 20 → 15, `END 지연 3.0+5.0` 은 **측정 당시 max_miss=3.0** 이었음을 명기(현재 5.0),
+    grace 권장 하한 예시 `4.0-3.0=1.0` → 현재 `max(0, 2.5-5.0)=0` **⇒ 그 기동 경고는 지금
+    구조적으로 발화하지 않음**(coast 가 ReID 창보다 길어 하한이 실제로 없음 = 위험 없음).
+    ★ **이 레포에도 같은 함정이 있다**: `debug_logs/best_params.yaml` 을 갈면 문서의 숫자가
+    조용히 낡는다. 이제 제품 쪽은 "유효값은 기동 시 `resolve_fusion_opts` info 로그로 확인" 을
+    단일 지침으로 적어 뒀다 — PoC 문서도 값을 되풀어 적기보다 그렇게 가리키는 편이 낫다.
+  - 남긴 것(Low, 미수정): 센서 0개 방의 stale 경고가 원인을 네트워크로 오지목 /
+    `LIMITED_NUM_OF_CAMERA` 가 주석의 상한을 실제로 걸지 않음 / README §4·§5.1 이
+    `room_candidates` 도입 전 서술 / f-string 필수 공백이 구버전 pycodestyle 에서 E201·E202.
+- **2026-07-30 (제품 vanguard_mmwave 를 방 단위로 정합 — 후속 반영)**
+  - 왜: `rooms` 가 생겼는데 제품은 방 이름을 백엔드 값(`room`/`roomId`/`cameraUrl`/
+    `stream_id`)에서만 뽑고 있었다. 플랫폼이 방을 안 내려주면 `stream_id`(`1_pia`) 같은
+    **임의 값**이 방 이름이 되어 `rooms` 에 없으니 **센서 0개 = 재실·체류 알람이 아예 안
+    나가는** 상태가 된다. 설정 파일이 방 이름의 단일 출처가 되도록 고쳤다(§5.2).
+  - `source.py`: `resolve_effective_room()`·`is_room_explicit()`·`room_candidates()` 신설.
+    명시된 방은 절대 바꾸지 않고, 명시가 없을 때만 설정의 방과 대조한다.
+    `add_stream` 은 **한 방을 두 스트림이 잡는 것을 거절**(검사·등록을 같은 락 구간에서 —
+    나눠 하면 동시 등록이 둘 다 통과한다). 0센서 error 로그에 **설정된 방 목록**을 함께 남긴다.
+  - `mmwave_core/epl_config.py` 재벤더링(`[VENDORED]` 변경 6): `_sensor_keys`·`_rooms_of`·
+    `get_room_ids`·`assert_one_room_per_sensor`. 쓰기 함수(`set_sensor_room` 등)는 제품이
+    설정을 읽기만 하므로 의도적으로 미벤더링.
+  - 트래킹은 원래부터 방 단위였다(방마다 SensorHub 하나 + 그 방 센서만) — 구조적으로
+    섞일 경로가 없음을 테스트로 고정했다. 알람 키는 레포 표준 `{stream_id}__{category}` 유지.
+  - 적대적 리뷰(5관점 병렬 + 반박 검증, 38건 중 6건 반박)에서 잡아 함께 고친 것:
+    · 한 센서를 두 방에 넣은 설정 → `assert_one_room_per_sensor` 로 거절(양쪽 레포)
+    · 멤버가 빈 방(`"room_2": []`)이 방 개수에 세어져 **단일 방 폴백이 조용히 꺼지던** 문제
+    · `get_sensors_for_room(None, ...)` 이 센서만 파일에서 읽고 `rooms` 는 무시하던 문제
+    · 문법 깨진 `epl_config.json` 위에 provision → 기존 센서·캘리브레이션·rooms **전부 소실**
+    · 센서별 `room` 태그만 쓰던 파일에 `rooms` 가 처음 생기면 태그 배정이 전부 죽던 문제
+      (`set_sensor_room` 이 태그를 먼저 `rooms` 로 마이그레이션)
+    · `--room ''` 로 방 2곳 이상을 한 좌표계에 맞춰 저장하던 문제 → 거절
+    · 방 센서 일부만 로그에 있으면 남은 센서가 옛 좌표계로 남던 것 → 명시 경고
+    · provision 의 '이 방 센서 N개'가 실제 매칭 수와 달랐던 것, 1대일 때 반드시 실패하는
+      캘리브레이션 안내, 쉘 `ROOM=` 인용 누락, 제품 0센서 오류 문구 오진
+  - 검증: 제품 **64 passed**(52 → +12), black 25.1.0·flake8 7.2.0 clean, PoC 방 로직 100체크
+    PASS(제품 헬퍼와 출력 대조 포함), v1/v2 selftest PASS,
+    실제 로그 `--room room_1 --dry-run` 회귀 0.
+  - 남은 알려진 한계(문서화만): 유니코드 정규화 다른 한글 방 이름은 별개 방으로 취급된다
+    (ASCII 권장). `rooms` 한 항목이 두 센서에 매칭될 수 있다 — A 센서의 `node_name` 이
+    B 센서의 `id` 와 같은 경우(id/node_name/host 교차 매칭 때문). 둘 다 실현 조건이 좁고
+    양쪽 레포가 동일하게 동작한다.
 - **2026-07-30 (센서 id 충돌 결함 수정 — 이 레포 + 제품 동시)**
   - `epl_config.short_id()` 가 `host.split(".")[0]` 로 시작해 **IP 만 적힌 센서의 id 가 첫
     옥텟('10')으로 전부 같아지던 결함**을 고쳤다. IP 는 점을 하이픈으로 바꿔 전체를 쓴다

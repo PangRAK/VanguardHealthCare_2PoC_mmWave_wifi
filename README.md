@@ -144,9 +144,9 @@ Wi‑Fi **비밀번호는 저장되지 않습니다**(프로비저닝 시 센서
   "discovery": true,          // mDNS(<node>.local) 자동 재연결
   "sensors": [
     {
-      "id": "98bd80",                                        // 짧은 식별자
-      "mac": "A4:F0:0F:98:BD:80",
-      "host": "everything-presence-lite-98bd80.local",       // 접속 주소(IP 또는 mDNS)
+      "id": "pia-1-1",                                       // ★ {organization}-{cameraId}-{sensorId}
+      "mac": "A4:F0:0F:98:BD:80",                            // 물리 센서 대조용(코드는 안 읽음)
+      "host": "10.201.31.120",                               // 접속 주소(고정 IP 권장)
       "node_name": "everything-presence-lite-98bd80",
       "name": "Sensor 1", "color": "#27e0c8",                // 화면 표시 이름·색
       "x": 0.0, "y": 0.0,                                    // 방 좌표계 위치(mm) — 자동 포지셔닝이 채움
@@ -158,6 +158,32 @@ Wi‑Fi **비밀번호는 저장되지 않습니다**(프로비저닝 시 센서
   ]
 }
 ```
+
+### 센서 id 규격 — 카메라 귀속
+
+```
+id = "{organization}-{cameraId}-{sensorId}"        예: "pia-1-1"
+```
+
+같은 `cameraId` 파트를 쓰는 센서들이 **한 카메라(=제품의 스트림 하나)** 에 묶인다.
+제품(Product-AI-mono)의 알람은 카메라 단위로 발화하고 MQ 봉투의 `cameraId` 는 백엔드
+등록값을 그대로 싣기 때문에, 이 파일은 "그 카메라에 어떤 센서가 묶이는가" 만 답한다.
+
+| 규칙 | 내용 |
+|---|---|
+| 파싱 | `split("-", 2)` 3파트. `organization`/`cameraId` 파트에는 `-` 불가, `sensorId` 파트에는 허용(예: `pia-1-10-201-31-120`) |
+| 비교 | 세 파트 모두 불투명 문자열(숫자로 파싱하지 않음). 대소문자·공백 정규화 후 대조 |
+| `sensorId` | 순번이지만 **바꿔도 된다** — 유일성만 지키면 동작이 같다. 대신 어느 물리 센서인지는 `mac` 으로만 알 수 있다 |
+| 실패 | id 형식 위반·`id` 누락·id 중복·같은 host 중복·옛 `rooms` 스키마 → 제품이 **스트림 등록을 거절**한다 |
+
+- 카메라를 정하거나 바꾸려면 `./run_provision.sh` 의 `CAMERA_ID`(또는 `--camera-id`)를
+  쓴다. **이때 센서 id 자체가 다시 쓰인다** — id 는 융합 입력의 `sid` 이자 기록
+  JSONL 의 센서 식별자라, 바꾸면 **이전 녹화와 대조가 끊긴다**(스크립트가 경고한다).
+- `x`/`y`/`heading_deg` 는 **방 좌표계** 값이고 카메라마다 별도의 방 좌표계다 →
+  카메라마다 `./run_auto_positioning_v2.sh --camera-id <id>` 를 따로 돌려야 한다.
+- ★ 현장 설치 시 `cameraId` 파트를 **병원이 부여한 숫자 cameraId** 로 교체해야 한다.
+  제품의 `AddStreamModel.cameraId` 는 `int` 라서 기본값 `camera1` 은 어떤 스트림과도
+  매칭되지 않는다(= 그 스트림은 센서 0개 → 체류 알람이 아예 안 나감).
 
 ---
 

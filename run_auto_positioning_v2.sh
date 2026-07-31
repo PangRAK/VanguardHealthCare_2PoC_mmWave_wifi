@@ -5,6 +5,7 @@
 #   ./run_auto_positioning_v2.sh --dry-run       # 계산만(저장 안 함)
 #   ./run_auto_positioning_v2.sh --gt-logs a.jsonl b.jsonl   # 특정 로그만(폴더보다 우선)
 #   ./run_auto_positioning_v2.sh --ref 98bd80    # 기준센서 지정(수평 설치로 아는 센서)
+#   ./run_auto_positioning_v2.sh --camera-id 7   # 아래 CAMERA_ID 대신 이번만 다른 카메라로
 #   ./run_auto_positioning_v2.sh --selftest      # 합성 다중로그로 알고리즘 검증(하드웨어/파일 불필요)
 #
 # run_auto_positioning.sh(지금 걸어다니며 1회 측정) 와 결과물은 동일(epl_config.json 의
@@ -14,6 +15,9 @@
 # 전제: 모든 로그가 '동일한 센서 배치'에서 '한 사람'을 기록한 것.
 #   (run_optimization.sh 가 쓰는 단일-인물 로그와 동일 → 같은 폴더를 그대로 재사용)
 # ★ 각 로그에서 사람이 '두 센서가 함께 보는 겹침 구역'을 곡선으로 지나가야 배치가 풀린다.
+# ★ 카메라를 나눠 쓰면 CAMERA_ID 를 바꿔 카메라마다 따로 돌리세요 — x/y/heading 은
+#   **방 좌표계** 값이고 카메라마다 별도의 방 좌표계입니다.
+#   (로그에 다른 카메라 센서가 섞여 있어도 CAMERA_ID 필터가 걸러냅니다)
 set -e
 cd "$(dirname "$0")"
 
@@ -26,9 +30,14 @@ MAX_GAP_MS=700       # 보간 허용 최대 공백(ms)
 MIN_OVERLAP=20       # 센서쌍 최소 동시관측 표본(풀링하면 로그별로 적어도 합쳐서 채워짐)
 INLIER_MM=300        # RANSAC 인라이어 임계(mm)
 REF=                 # 기준센서 id(수평 설치로 아는 센서). 비우면 자동선택. 예: REF=98bd80
+# 캘리브레이션할 카메라(stream) 식별자. 로그 헤더의 센서 중 id 접두가 이 카메라를
+# 가리키는 것만 사용한다. 비우면(CAMERA_ID=) 카메라 구분 없이 로그의 전 센서를 쓴다.
+CAMERA_ID="camera1"
+ORGANIZATION="pia"
 
 APOS_ARGS=(--logs-dir "$GT_DIR" --hz "$HZ" --max-gap-ms "$MAX_GAP_MS"
-           --min-overlap "$MIN_OVERLAP" --inlier-mm "$INLIER_MM")
+           --min-overlap "$MIN_OVERLAP" --inlier-mm "$INLIER_MM" \
+           --camera-id "$CAMERA_ID" --organization "$ORGANIZATION")
 if [ -n "$REF" ]; then APOS_ARGS+=(--ref "$REF"); fi
 
 if [ ! -d .venv ]; then
