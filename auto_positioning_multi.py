@@ -34,7 +34,7 @@ run_auto_positioning.sh(라이브 1회 측정) 와 목적은 같다: 각 센서�
     python auto_positioning_multi.py --gt-logs a.jsonl b.jsonl c.jsonl
     python auto_positioning_multi.py --logs-dir ... --dry-run
     python auto_positioning_multi.py --ref 98bd80
-    python auto_positioning_multi.py --camera-id 7     # 그 카메라 센서만 캘리브레이션(기본 camera1)
+    python auto_positioning_multi.py --camera-id 7     # 그 카메라 센서만 캘리브레이션(기본 1)
     python auto_positioning_multi.py --selftest        # 합성 다중로그로 검증(하드웨어/파일 불필요)
 
 ★ 카메라마다 따로 돌려야 한다 — x/y/heading 은 '방 좌표계' 값이고 **카메라마다 별도의 방

@@ -268,20 +268,29 @@ def discover_sensors(timeout: float = 4.0,
 
 # ----------------------------------------------------------------- 다중 소스 빌더
 def _host_to_spec(host: str, index: int) -> dict:
-    """--host 로 넘어온 주소 문자열을 센서 spec 으로 정규화."""
-    from epl_config import normalize_sensor
+    """--host 로 넘어온 주소 문자열을 센서 spec 으로 정규화.
+
+    ★ 이 경로에는 카메라 문맥(organization/cameraId)이 없어 규격 3-파트 id 를 만들 수 없다.
+      그래도 id 는 융합 입력의 sid 라 비워둘 수 없으므로 host 유래 로컬 식별자(short_id)를
+      쓴다 — 자동 sensorId 순번(assign_missing_sensor_ids)은 카메라를 아는 경로 전용이다.
+      비우면 여러 센서의 sid 가 전부 ""로 겹쳐 한 사람이 여러 명으로 세어진다."""
+    from epl_config import normalize_sensor, short_id
     node = host[:-6] if host.endswith(".local") else ""
-    return normalize_sensor({"host": host, "node_name": node}, index)
+    spec = normalize_sensor({"host": host, "node_name": node}, index)
+    spec["id"] = short_id(node, host)
+    return spec
 
 
 def _spec_key(s: dict) -> str:
     """중복 판정용 키(node_name 우선, 없으면 host).
 
     ★ 첫 점에서 자르지 않는다 — IP 호스트가 첫 옥텟으로 뭉개지면 같은 대역 센서들이
-      한 키로 겹쳐 조용히 버려진다(3대 등록 → 1대만 남는 사고)."""
-    from epl_config import strip_dns_suffix
-    base = (s.get("node_name") or s.get("host") or s.get("id") or "").strip().lower()
-    return strip_dns_suffix(base)
+      한 키로 겹쳐 조용히 버려진다(3대 등록 → 1대만 남는 사고).
+    ※ 구현은 epl_config.spec_key 하나뿐이다 — 여기의 중복 판정 키와 sensorId 자동 배정의
+      정렬 키(assign_missing_sensor_ids)가 갈라지면 '주소로는 같은 기기, 순번으로는 다른
+      센서' 가 되어 한 기기에 리더 스레드가 두 개 붙는다(같은 사람을 두 번 센다)."""
+    from epl_config import spec_key
+    return spec_key(s)
 
 
 def build_sources(hub, *, demo: bool = False, hosts: Optional[list] = None,
@@ -306,8 +315,8 @@ def build_sources(hub, *, demo: bool = False, hosts: Optional[list] = None,
     각 worker 는 hub.add_sensor() 로 만든 SensorState 에 데이터를 채운다.
     server.py / gui_qt.py / cli_monitor.py 가 공통으로 사용한다."""
     from mmwave_reader import DemoSensorThread       # 지연 import (순환 방지)
-    from epl_config import (load_config, get_sensors, normalize_sensor, DEFAULT_PALETTE,
-                            assert_unique_sensor_ids)
+    from epl_config import (load_config, get_sensors, normalize_sensor, short_id,
+                            DEFAULT_PALETTE, assert_unique_sensor_ids)
 
     workers = []
 
@@ -346,6 +355,10 @@ def build_sources(hub, *, demo: bool = False, hosts: Optional[list] = None,
                 k = _spec_key(f)
                 cand = normalize_sensor({"node_name": f["node_name"], "host": f["host"]},
                                         len(by_key))
+                # ★ 탐색된 센서에는 카메라 문맥이 없어 규격 id 를 만들 수 없다 → host 유래
+                #   로컬 id 를 붙인다(sid 가 비면 융합 입력 키가 겹친다). 이 분기는 설치
+                #   편의용이고, 규격 id 는 프로비저닝(--camera-id)에서 확정된다.
+                cand["id"] = short_id(f["node_name"], f["host"])
                 # 같은 기기가 설정+탐색으로 두 번 들어오는 경우(키가 달라도 id 가 같다) 건너뛴다
                 if k in by_key or cand["id"] in known_ids:
                     continue

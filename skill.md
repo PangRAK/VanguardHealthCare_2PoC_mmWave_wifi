@@ -87,22 +87,31 @@
 - **옛 `rooms` 스키마는 자동 마이그레이션하지 않는다.** 옮기려면 코드가 센서 id 를 바꿔야
   하는데, id 는 융합 입력의 `sid` 이자 관제 화면·기록 JSONL 의 센서 식별자다. 코드가
   조용히 바꾸면 화면·로그가 실동작과 어긋난다.
-- 도구 3종이 `--camera-id`(기본 `camera1`, `epl_config.DEFAULT_CAMERA_ID`)를 받는다:
+- 도구 3종이 `--camera-id`(기본 `1`, `epl_config.DEFAULT_CAMERA_ID`)를 받는다:
 
   | 스크립트 | 설정 변수 | 카메라를 쓰는 방식 |
   |---|---|---|
-  | `run_provision.sh` | `CAMERA_ID=camera1` | 이번에 연결한 센서의 **id 를 다시 써서** 그 카메라에 귀속 |
-  | `run_auto_positioning.sh` | `CAMERA_ID=camera1` | 그 카메라 센서에만 접속해 측정·저장 |
-  | `run_auto_positioning_v2.sh` | `CAMERA_ID=camera1` | 로그 헤더 센서 중 그 카메라 것만 풀링 |
+  | `run_provision.sh` | `CAMERA_ID=1` | 이번에 연결한 센서의 **id 를 다시 써서** 그 카메라에 귀속 |
+  | `run_auto_positioning.sh` | `CAMERA_ID=1` | 그 카메라 센서에만 접속해 측정·저장 |
+  | `run_auto_positioning_v2.sh` | `CAMERA_ID=1` | 로그 헤더 센서 중 그 카메라 것만 풀링 |
 
   세 스크립트 모두 `CAMERA_ID=` (빈 값) → 센서 id 를 안 건드림. CLI `--camera-id` 가 우선.
 - ★★ **`set_sensor_camera()` 는 목록 편집이 아니라 정체성 변경이다.** 카메라를 바꾸면
   센서 id 가 바뀌고, 그 id 는 융합 입력의 `sid` 이자 기록 JSONL(`header.sensors[].id` /
   `raw[].sid` / `dets[].sid`)의 센서 식별자다 → **이전 녹화와 대조가 끊긴다.**
   `provision_wifi.py` 가 바뀐 id 를 출력으로 경고한다.
-- ★ **현장 설치 시 `cameraId` 파트를 병원이 부여한 숫자 cameraId 로 교체해야 한다.**
-  제품의 `AddStreamModel.cameraId` 는 `int` 라 기본값 `camera1` 은 어떤 스트림과도
-  매칭되지 않는다(= 그 스트림은 센서 0개 → 체류 알람이 아예 안 나감).
+- ★ **현장 설치 시 `cameraId` 파트를 병원이 부여한 실제 cameraId 로 교체해야 한다.**
+  숫자일 필요는 없다 — 제품의 `AddStreamModel.cameraId` 는 **문자열**이고, 백엔드가 JSON
+  숫자로 보내도 DTO 경계(`coerce_camera_id`)에서 문자열로 승격된다. 교체하지 않으면 기본값
+  `1` 이 현장 카메라와 안 맞아 그 스트림은 센서 0개가 된다(= 체류 알람이 아예 안 나감).
+  · **`cameraId` 에 `_` 금지** — 제품 `stream_id` 가 `{cameraId}_{organization}` 이고 폴백이
+    첫 `_` 1회 분해라 `ward_a`+`pia` 가 `ward`+`a_pia` 로 갈린다(카메라·테넌트가 동시에
+    틀리며 예외도 로그도 없다). `-` 도 센서 id 구분자라 금지. `organization` 쪽 `_` 는 허용.
+- **`sensorId` 는 생략하면 자동 배정된다** — 그 카메라에서 아직 안 쓰인 최소 순번을 기기
+  유래 `spec_key`(node_name/host) 정렬로 **결정적으로** 준다(배열 순서 무관, 전역 카운터
+  없음). **명시한 id 는 절대 재번호화하지 않는다.** 대조는 `normalize_id_value`
+  (`strip().lower()`) 단일 기준이라 **대소문자만 다른 id 도 중복**이고, 숫자 정규화는 없어
+  `"01"` 과 `"1"` 은 다른 id 다. 비숫자(`north`)·비연속·역순 sensorId 도 정상 동작한다.
 - **카메라를 나누면 카메라마다 따로** `./run_auto_positioning_v2.sh --camera-id <id>` 를
   돌려야 한다(한 번에 돌리면 서로 다른 방 좌표계를 억지로 하나에 맞춘 배치가 저장된다).
 - ⚠ **시각화·진단 도구는 아직 카메라를 모른다** (`server.py` / `gui_qt.py` / `cli_monitor.py` /
@@ -197,9 +206,13 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
         (`test_real_epl_config` / `test_real_epl_config_ids_conform`)는 fail 이 아니라
         **명시적 skip** 으로 그 사실을 알린다. 올릴 파일은 이 레포의 `epl_config.json`
         과 같은 내용(`pia-1-1/2/3`)이다.
-  - [ ] **현장 설치 시 `cameraId` 파트를 병원 실제 숫자 cameraId 로 교체** — 제품의
-        `AddStreamModel.cameraId` 는 `int` 라 기본값 `camera1` 은 매칭되지 않는다.
-        `./run_provision.sh` 의 `CAMERA_ID` 또는 `--camera-id <숫자>`.
+  - [x] ~~제품의 `AddStreamModel.cameraId` 가 `int` 라 비숫자 cameraId 가 매칭되지 않던
+        문제~~ → **해소됨(2026-08-02)**: `cameraId` 는 문자열이고 백엔드가 JSON 숫자로
+        보내도 DTO 경계(`coerce_camera_id`)에서 승격된다. 이제 `ward-a` 같은 값도 등록된다.
+  - [ ] **현장 설치 시 `cameraId` 파트를 병원이 부여한 실제 cameraId 로 교체**(값 자체는
+        여전히 현장 값이어야 한다 — 기본값 `1` 은 그 병원 카메라가 아니다).
+        `./run_provision.sh` 의 `CAMERA_ID` 또는 `--camera-id <id>`. 숫자 제약은 없고,
+        `_` 와 `-` 만 쓸 수 없다.
   - [ ] **백엔드가 `cameraId`/`organization` 을 정확히 내려주는지 확인** — 이제 이 둘이
         카메라 식별의 **단일 출처**다(`cameraUrl`/`room`/`roomId` 는 읽지 않는다).
         없으면 `stream_id`(`{cameraId}_{organization}`) 분해로 폴백한다.
@@ -217,8 +230,9 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
 2. Mac을 **병실 Wi-Fi에 연결**.
 3. **센서를 Mac에 USB 연결**.
 4. `./run_provision.sh --ssid <병실SSID> --password <PW>` → 센서를 병실 Wi-Fi에 등록.
-   - **[카메라 배정] 스크립트의 `CAMERA_ID`**(기본 `camera1`)가 이 센서가 귀속될 카메라다.
-     ★ 현장에서는 **병원이 부여한 숫자 cameraId** 로 바꿔야 한다(제품의 `cameraId` 는 int).
+   - **[카메라 배정] 스크립트의 `CAMERA_ID`**(기본 `1`)가 이 센서가 귀속될 카메라다.
+     ★ 현장에서는 **병원이 부여한 실제 cameraId** 로 바꿔야 한다(숫자가 아니어도 된다 —
+     제품의 `cameraId` 는 문자열이다. 단 `_`·`-` 는 쓸 수 없다).
      카메라가 여러 개면 그 카메라 센서를 다 끝낸 뒤 `CAMERA_ID` 를 바꿔 다음 카메라 센서를
      프로비저닝한다(또는 이번만 `--camera-id 8`). 출력의 `카메라: pia-7 · 이 카메라 센서 N개`
      로 확인.
@@ -264,6 +278,60 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
 
 ## [변경 로그]
 
+- **2026-08-02 (순번 sensorId 자동 배정 · `cameraId` 문자열화 · 정규화 단일 기준)**
+  - **왜**: 2026-07-31 전환은 id 규격을 세웠지만 **id 를 누가 정하는가**는 남겨뒀다. 그
+    결과 (a) id 를 생략하면 host 유래 값(`98bd80` / `10-201-31-120`)이 sensorId 파트가 돼
+    사람이 읽을 수 없고 카메라 순번 체계 밖에 남았고, (b) 제품 `AddStreamModel.cameraId`
+    가 `int` 라 비숫자 cameraId 를 아예 못 받았으며, (c) 중복 검사와 카메라 대조가 서로
+    다른 기준(원문 vs 정규화)을 써서 **대소문자만 다른 id 가 중복 검사를 통과한 뒤 같은
+    카메라에 둘 다 붙는** 구멍이 있었다.
+  - **순번 자동 배정**(`assign_missing_sensor_ids`): id 를 생략하면 그 카메라에서 아직 안
+    쓰인 **최소 순번**을 받는다. 정렬 기준은 기기에 붙어 있는 값(`spec_key` — node_name >
+    host)이라 **배열 순서·호출 순서와 무관하게 결정적**이다(전역 카운터 없음).
+    **명시된 id 는 예약만 되고 절대 재번호화되지 않는다.** `spec_key` 가 비었거나 서로
+    겹치면 조용히 순서로 떨어지지 않고 ValueError — 순서로 배정하면 같은 기기가 재등록
+    때마다 다른 순번을 받아 융합 `sid` 와 기록 JSONL 식별자가 말없이 바뀐다.
+  - **`normalize_sensor` 가 더 이상 id 를 만들지 않는다**(없으면 `""`). 순번은 목록 전체를
+    봐야 정해지는데 이 함수는 한 항목만 보기 때문이다. 카메라 문맥이 없는 도구 경로
+    (`--host` 즉석 지정 / mDNS 탐색)만 호출측이 `short_id` 로 로컬 id 를 채운다.
+  - **쓰기 경로(이 레포 전용 — 제품은 설정을 읽기만 한다)**: `assign_camera_sensor_ids` 를
+    새로 뒀다. 프로비저닝은 `upsert_sensor` → **순번 확정** → `set_sensor_camera` 순서로
+    돌고, 확정된 id 를 그대로 JSON 에 **영속화**한다. 이 단계가 없으면 `id: ""` 가 저장되고
+    다음 실행의 `get_sensors()` 가 ValueError 로 죽어 **도구 전체가 멈춘다**.
+    · 순번 예약을 **카메라 단위로 좁힌다** — 파일에는 여러 카메라가 섞여 있어서 전체로
+      예약하면 카메라 2 의 첫 센서가 `pia-2-3` 처럼 이유 없이 밀린다. 순번은 카메라마다 1부터.
+    · `upsert_sensor` 가 기존 id 를 빈 값으로 덮어쓰지 않게 막았다(재프로비저닝 시 확정된
+      규격 id 가 지워져 그 센서가 카메라에서 떨어져 나가던 경로).
+  - **`set_sensor_camera`**: 규격 id 의 sensorId 파트는 계속 보존하되, **비규격 옛 id 만**
+    그 카메라의 미사용 최소 순번으로 옮긴다(`98bd80` → `pia-1-3`). 옛 동작(`pia-1-98bd80`)은
+    형식만 맞고 순번 체계 밖이라 폐기했다. id 를 생략한 항목 역조회는 `spec_key` 대조로
+    바꿨다(`normalize_sensor` 가 자동 id 를 만들어주던 옛 폴백이 죽었으므로).
+  - **`cameraId` 는 문자열**(제품 `DTO/stream_params.py`): 세 모델(`AddStreamModel` /
+    `DeleteStreamModel` / `RTSPErrorModel`)의 선언을 `str` 로 바꾸고, 백엔드가 아직 JSON
+    숫자로 보내는 값은 **DTO 경계 한 곳**(`coerce_camera_id`)에서만 승격한다(소비 모듈에서
+    `str()` 로 봉합하지 않는다). `strip` 만 하고 `"06"→6` 같은 숫자 해석은 하지 않으며
+    `bool` 은 거절한다. MQ 봉투의 `cameraId` 도 **JSON 문자열**로 나간다.
+    · **새 제약: `cameraId` 에 `_` 금지** — `stream_id` 가 `{cameraId}_{organization}` 이고
+      폴백이 첫 `_` 1회 분해라 `ward_a`+`pia` 가 `ward`+`a_pia` 로 갈린다(카메라·테넌트가
+      동시에 틀리며 예외도 로그도 없다). `organization` 쪽 `_` 는 계속 허용.
+    · 이 레포 기본값 `DEFAULT_CAMERA_ID` 를 `"camera1"` → **`"1"`** 로 바꿨고, 문서·CLI
+      도움말의 "제품 cameraId 는 int 라 비숫자는 매칭 안 됨" 문구를 전부 걷어냈다(거짓이 됨).
+  - **정규화 단일 기준**(`normalize_id_value` 공개, `_norm` 완전 제거 — 별칭 없음):
+    카메라 대조와 중복 판정이 같은 기준(`strip().lower()`)을 쓴다. 중복 오류 메시지는
+    정규화 키에 접힌 **원문 스펠링을 전부** 보여준다(`'PIA-1-A'/'pia-1-a' -> hosts=[…]`).
+    숫자 정규화는 하지 않으므로 `"01"` ≠ `"1"` 이다.
+  - **⚠ 옛 id 범위가 넓어졌다**: **2026-07-31 전환분으로 생성된 host 유래 자동 id
+    (`98bd80` / `10-201-31-120`)도 이제 "옛 id" 다.** 그때 녹화한 JSONL 의 `sid` 는 그 값으로
+    남아 새 설정과 센서 대조가 안 된다(재생 자체는 된다 — `replay_frames` 는 `sid` 를
+    불투명 키로 취급). `--camera-id` 로 다시 프로비저닝하면 순번 id 로 옮겨진다.
+  - **마이그레이션**: `pia-camera1-*` 로 프로비저닝된 설정이 있으면 `--camera-id 1` 로 다시
+    실행해 옮긴다. 이 레포 작업트리의 `epl_config.json` 은 배포 기준 그대로다(`pia-1-1/2/3`,
+    3대) — 로컬 재프로비저닝본은 `epl_config.backup.json`(untracked)에만 있고 커밋 대상이 아니다.
+  - **검증**: 제품 `test_vanguard_mmwave.py` **81 passed / 0 skipped**(실자산 리플레이 포함),
+    black·flake8 clean. 리플레이 회귀 **3/3 발화 유지**(peak 116.7 / 117.0 / 94.6s).
+    이 레포는 프로비저닝 왕복 스모크(`upsert` → 순번 배정 → `save` → `load`/`get_sensors()`)로
+    A-2 회귀를 막았다.
+
 - **2026-07-31 (`rooms` 폐기 → 센서 id 규격화 `{organization}-{cameraId}-{sensorId}`)**
   - **왜**: 알람은 기존 레포 컨벤션대로 **카메라 단위**로 발화하고, MQ 봉투의 `cameraId` 는
     `DTO/output_handler.make_alarm_message` 가 `user_param["user_param"]["cameraId"]` 에서
@@ -280,7 +348,7 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
     `assert_no_legacy_schema` / `assert_unique_sensor_hosts` / `get_camera_ids` /
     `get_sensors_for_camera`, 제품 `resolve_camera_id`(카메라 해석 단일 경로),
     PoC `set_sensor_camera`(**센서 id 재작성**) / `nonconforming_sensor_ids` /
-    `DEFAULT_CAMERA_ID`("camera1") / `DEFAULT_ORGANIZATION`("pia").
+    `DEFAULT_CAMERA_ID`("camera1" — **2026-08-02 에 "1" 로 바뀜**) / `DEFAULT_ORGANIZATION`("pia").
     클래스·필드도 개명: `MmwaveRoomSource`→`MmwaveCameraSource`,
     `MmwaveSourceManager.rooms`→`.streams`, 도구 `--room`→`--camera-id`, `ROOM=`→`CAMERA_ID=`.
   - **용어 규칙(중요)**: `room` 은 **좌표계 전용**으로 남겼다 — `room_transform`/`sensor_local`/
@@ -313,8 +381,10 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
     신규 e2e 5종으로 **설정 → 귀속 → 허브 → 융합 → 이벤트 → 알람**을 한 줄로 꿰었고,
     레포 최초로 `make_alarm_message` MQ 봉투 계약을 테스트로 못박았다
     (센서 id 의 cameraId 파트 == 스트림 cameraId == MQ `cameraId`).
-  - **남은 게이트**: HF 자산 교체 / 현장 숫자 cameraId 로 교체 / 백엔드가 cameraId·
+  - **남은 게이트**: HF 자산 교체 / 현장 cameraId 로 교체 / 백엔드가 cameraId·
     organization 을 내려주는지 확인 (§10).
+    (당시엔 "**숫자** cameraId 로 교체" 였다 — 2026-08-02 에 `cameraId` 가 문자열이 되어
+     숫자 제약이 사라졌다. 현장 값으로 바꿔야 한다는 것 자체는 그대로다.)
 - **2026-07-30 (방(room)↔센서 매핑 도입 — 설치 도구 3종 + 설정 파일)**
   - 왜: 제품은 **방 단위(stream)로 재실/체류를 판정**하는데, `epl_config.json` 에 방 정보가
     없어 `get_sensors_for_room` 의 3순위 폴백(전 센서)이 걸리고 있었다. 방이 1곳인 지금은

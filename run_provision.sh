@@ -22,10 +22,12 @@ cd "$(dirname "$0")"
 #  · x/y/heading 은 **방 좌표계** 값이고 카메라마다 별도의 방 좌표계이므로, 등록 후
 #    카메라마다 ./run_auto_positioning_v2.sh --camera-id <id> 를 따로 돌려야 한다.
 #
-# ★★ 현장 설치 시 반드시 **병원이 부여한 숫자 cameraId** 로 교체하세요.
-#    제품의 AddStreamModel.cameraId 는 int 라서 기본값 'camera1' 은 어떤 스트림과도
-#    매칭되지 않습니다(= 그 스트림은 센서 0개 → 체류 알람이 아예 안 나감).
-CAMERA_ID="camera1"
+# ★★ 현장 설치 시 반드시 **병원이 부여한 실제 cameraId** 로 교체하세요. 숫자가 아니어도
+#    됩니다(제품의 AddStreamModel.cameraId 는 문자열입니다). 교체하지 않으면 기본값 '1' 이
+#    현장 카메라와 안 맞아 그 스트림은 센서 0개가 됩니다(= 체류 알람이 아예 안 나감).
+#    단 cameraId 에 '_' 는 쓸 수 없습니다 — 제품 stream_id 가 '{cameraId}_{organization}'
+#    이라 경계가 모호해집니다('-' 는 센서 id 구분자라 역시 금지).
+CAMERA_ID="1"
 ORGANIZATION="pia"
 
 if [ ! -d .venv ]; then

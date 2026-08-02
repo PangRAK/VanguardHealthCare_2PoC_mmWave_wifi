@@ -24,7 +24,7 @@ HZ=15                # 샘플링/보간 주파수(Hz) — 보통 그대로 두�
 REF=                 # 기준센서 id(수평 설치로 아는 센서). 비우면 자동선택. 예: REF=98bd80
 # 캘리브레이션할 카메라(stream) 식별자. id 접두가 이 카메라를 가리키는 센서에만
 # 접속·저장한다. 비우면(CAMERA_ID=) 카메라 구분 없이 등록된 전 센서를 쓴다.
-CAMERA_ID="camera1"
+CAMERA_ID="1"
 ORGANIZATION="pia"
 
 APOS_ARGS=(--seconds "$MEASURE_SECONDS" --start-delay "$START_DELAY" --hz "$HZ"

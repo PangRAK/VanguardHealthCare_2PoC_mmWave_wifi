@@ -32,7 +32,7 @@ INLIER_MM=300        # RANSAC 인라이어 임계(mm)
 REF=                 # 기준센서 id(수평 설치로 아는 센서). 비우면 자동선택. 예: REF=98bd80
 # 캘리브레이션할 카메라(stream) 식별자. 로그 헤더의 센서 중 id 접두가 이 카메라를
 # 가리키는 것만 사용한다. 비우면(CAMERA_ID=) 카메라 구분 없이 로그의 전 센서를 쓴다.
-CAMERA_ID="camera1"
+CAMERA_ID="1"
 ORGANIZATION="pia"
 
 APOS_ARGS=(--logs-dir "$GT_DIR" --hz "$HZ" --max-gap-ms "$MAX_GAP_MS"

@@ -14,7 +14,7 @@
   python provision_wifi.py --probe         # 장치 상태/펌웨어 정보만 확인(읽기전용)
   python provision_wifi.py --ssid MyAP --password 's3cret'   # 비대화형
   python provision_wifi.py --port /dev/cu.usbserial-2140
-  python provision_wifi.py --camera-id 7     # 이 센서를 카메라 7 에 귀속(기본 camera1)
+  python provision_wifi.py --camera-id 7     # 이 센서를 카메라 7 에 귀속(기본 1)
   python provision_wifi.py --camera-id ''    # 카메라 귀속을 건드리지 않음(센서 id 유지)
 """
 from __future__ import annotations
@@ -28,8 +28,8 @@ from urllib.parse import urlparse
 from improv_serial import ImprovSerial, ImprovError
 from epl_config import (
     load_config, save_config, upsert_sensor, set_sensor_camera, nonconforming_sensor_ids,
-    get_sensors_for_camera, CONFIG_PATH, DEFAULT_CAMERA_ID,
-    DEFAULT_ORGANIZATION,
+    get_sensors_for_camera, assign_camera_sensor_ids, short_id, CONFIG_PATH,
+    DEFAULT_CAMERA_ID, DEFAULT_ORGANIZATION,
 )
 from mmwave_reader import autodetect_port
 
@@ -61,8 +61,9 @@ def main() -> int:
     ap.add_argument("--camera-id", default=DEFAULT_CAMERA_ID,
                     help=f"이 센서를 귀속시킬 카메라(stream) 식별자 (기본 {DEFAULT_CAMERA_ID}). "
                          "빈 문자열이면 센서 id 를 건드리지 않는다. "
-                         "★ 현장에서는 병원이 부여한 숫자 cameraId 로 주세요 — 제품의 "
-                         "AddStreamModel.cameraId 는 int 라 'camera1' 은 매칭되지 않습니다.")
+                         "★ 현장에서는 병원이 부여한 실제 cameraId 로 주세요 — 숫자가 아니어도 "
+                         "됩니다(제품의 AddStreamModel.cameraId 는 문자열입니다). "
+                         "단 '_' 와 '-' 는 쓸 수 없습니다.")
     ap.add_argument("--organization", default=DEFAULT_ORGANIZATION,
                     help=f"센서 id 의 organization 파트 (기본 {DEFAULT_ORGANIZATION})")
     ap.add_argument("--verbose", action="store_true")
@@ -180,13 +181,27 @@ def main() -> int:
             # 귀속이 id 안에 있으므로 카메라를 정하려면 id 자체가 바뀐다(정체성 변경).
             # ★ 실패해도 센서 등록(=USB 재작업이 필요한 값)은 반드시 저장한다.
             #   set_sensor_camera 는 검증을 먼저 하므로 실패 시 id 를 건드리지 않는다.
-            old_id = saved.get("id")
+            old_id = str(saved.get("id") or "")
             new_id, camera_error, camera_sensor_count = old_id, None, 0
             if camera_id:
                 try:
-                    new_id = set_sensor_camera(cfg, old_id, camera_id, organization)
-                except (ValueError, KeyError) as e:   # 옛 rooms 스키마 / id 충돌
+                    # ★ 저장 **전에** 순번 sensorId 를 확정한다. normalize_sensor 는 더 이상
+                    #   id 를 만들지 않으므로(목록 전체를 봐야 순번이 정해진다) 방금 등록한
+                    #   센서는 id 가 비어 있다. 그대로 저장하면 다음 실행의 get_sensors() 가
+                    #   'id 없음' ValueError 로 죽어 시각화·진단·캘리브레이션이 전부 멈춘다.
+                    #   배정 결과는 이 자리에서 JSON 에 영속화되고, 이후 배열 순서가 바뀌어도
+                    #   다시 계산하지 않는다(재번호화 없음 — id 는 융합 sid 이자 기록 식별자).
+                    assign_camera_sensor_ids(cfg, organization, camera_id)
+                    new_id = set_sensor_camera(cfg, saved.get("id"), camera_id, organization)
+                except (ValueError, KeyError) as e:   # 옛 rooms 스키마 / id 충돌 / 배정 불가
                     camera_error = e
+            if not str(saved.get("id") or "").strip():
+                # 여기까지 id 가 비었다는 건 --camera-id '' (귀속 안 함)이거나 위 배정이
+                # 실패했다는 뜻이다. 빈 id 를 파일에 남기면 다음 실행이 통째로 죽으므로,
+                # 카메라 문맥이 없는 다른 도구 경로(--host / mDNS 탐색)와 같은 규칙으로
+                # host 유래 로컬 id 를 채운다. 규격 id 가 아니라서 아래 '규격을 벗어난
+                # 센서' 경고에 잡히고, --camera-id 로 다시 실행하면 순번으로 옮겨진다.
+                saved["id"] = short_id(node_name, host)
             save_config(cfg)
             total = len(cfg.get("sensors", []))
             print(f"💾 설정 저장: {CONFIG_PATH}")
@@ -196,12 +211,20 @@ def main() -> int:
                 print(f"     설정 오류: {camera_error}")
                 print(f"     → {CONFIG_PATH} 를 고친 뒤 이 스크립트를 다시 실행하세요.")
             elif camera_id:
-                if new_id != old_id:
+                if not old_id:
+                    # 신규 등록 — '바뀐' 게 아니라 처음 붙은 것이다. 순번은 그 카메라에서
+                    # 아직 안 쓰인 최소값이며, 사람이 읽기 쉬우라는 **관례일 뿐 기능적
+                    # 순서가 아니다**(비숫자·비연속·역순 sensorId 도 정상 동작한다).
+                    print(f"   센서 id 배정: {new_id!r}"
+                          f"  (카메라 '{camera_id}' 에서 아직 안 쓰인 최소 순번)")
+                elif new_id != old_id:
                     # ★★ id 는 단순 라벨이 아니다 — 융합 입력의 sid 이자 기록 JSONL 의
                     #    센서 식별자다. 바뀌면 이전 녹화와 대조가 끊긴다.
                     print(f"   ⚠ 센서 id 가 바뀌었습니다: {old_id!r} → {new_id!r}")
                     print("     id 는 융합 입력의 sid 이자 기록 JSONL 의 센서 식별자입니다 —")
                     print("     이전에 녹화한 로그(raw_*.jsonl)는 옛 id 로 남아 대조가 끊깁니다.")
+                    print("     (2026-07-31 전환분으로 붙은 host 유래 자동 id 도 이제"
+                          " '옛 id' 입니다.)")
                 try:
                     mapped = get_sensors_for_camera(cfg, organization, camera_id)
                 except ValueError as e:      # 손으로 고친 설정이 불변식을 깬 경우
@@ -220,7 +243,14 @@ def main() -> int:
                         print(f"       {CONFIG_PATH} 의 \"id\" 를 "
                               "'{organization}-{cameraId}-{sensorId}' 형식으로 고치세요.")
             else:
-                print("   카메라: 지정 안 함 — 센서 id 를 건드리지 않았습니다.")
+                print("   카메라: 지정 안 함 — 기존 센서의 id 는 건드리지 않았습니다.")
+                if not old_id:
+                    # 신규 센서는 id 가 없던 상태라 '건드리지 않는다' 가 성립하지 않는다.
+                    # 카메라를 모르면 규격 id 를 만들 수 없어 로컬 id 만 붙였고, 그 상태로는
+                    # 제품이 스트림 등록을 거절한다 — 그 사실을 여기서 분명히 알린다.
+                    print(f"   ⚠ 새 센서에는 임시 로컬 id {saved['id']!r} 만 붙었습니다"
+                          " — 규격(3-파트) id 가 아니라 제품이 등록을 거절합니다.")
+                    print("     → --camera-id <id> 로 다시 실행해 카메라에 귀속시키세요.")
             if not host:
                 print("   ⚠ 주소를 못 받았습니다. 공유기 관리페이지에서 IP 확인 후")
                 print(f"     {CONFIG_PATH} 의 해당 센서 \"host\" 를 직접 채워주세요. (node: {node_name or '?'})")
