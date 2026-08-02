@@ -165,8 +165,11 @@ def add_fusion_args(ap):
             g.add_argument(f"--{p.cli}", choices=p.choices, default=None, help=p.help)
         else:
             g.add_argument(f"--{p.cli}", type=_KIND_CAST[p.kind], default=None, help=p.help)
-    # fuse-hz 는 FusionTracker 인자가 아니라 hub 스텝 주기(apply_fusion_opts 에서 처리) — 별도 유지
+    # fuse-hz / interval-sec 는 FusionTracker 인자가 아니라 hub 스텝 주기(apply_fusion_opts 에서 처리)
     g.add_argument("--fuse-hz", type=float, default=None, help="융합 처리 주파수(Hz) — window/stride '프레임' 기준 (15)")
+    g.add_argument("--interval-sec", type=float, default=None,
+                   help="융합 스텝 간격(초). 제품(vanguard_mmwave) OD_TIME_INTERVAL_SECOND 와 같은 "
+                        "뜻이며 --fuse-hz 보다 우선(= 1/fuse-hz). 미지정 시 --fuse-hz 사용")
 
 
 def tracker_params(tracker):
@@ -186,12 +189,17 @@ def apply_fusion_opts(hub, args):
     opts = resolve_fusion_opts(cfg, **over)
     if opts:
         hub.enable_fusion(**opts)
+    # 융합 스텝 주기 — hub 의 스텝 상한. 초(interval-sec) 가 Hz(fuse-hz) 보다 우선한다:
+    # 제품(vanguard_mmwave)이 OD_TIME_INTERVAL_SECOND(초) 로 이 주기를 정하므로 같은 단위로 맞춘다.
+    iv = getattr(args, "interval_sec", None)
     hz = getattr(args, "fuse_hz", None)
-    if hz:                                  # 융합 처리 주파수(base fps) 조정 — hub 의 스텝 상한
-        try:
+    try:
+        if iv and float(iv) > 0:
+            hub._fuse_interval = float(iv)
+        elif hz:
             hub._fuse_interval = 1.0 / float(hz)
-        except (ValueError, ZeroDivisionError, AttributeError):
-            pass
+    except (ValueError, ZeroDivisionError, AttributeError):
+        pass
 
 
 def replay_frames(frames, params, confirmed_only=True):

@@ -10,7 +10,7 @@
 # ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 # │  하이퍼파라미터 설명 (값은 아래 '설정' 블록에서 바꾸세요. CLI 인자가 있으면 그게 우선.)                                             │
 # ├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-# │ [단위] '프레임' = 융합 처리 프레임(FUSE_HZ, 기본 15Hz). GUI 60fps·센서 원본 ~3Hz 와 다름.                                           │
+# │ [단위] '프레임' = 융합 스텝 1회(INTERVAL_SECOND, 기본 0.1초=10Hz). GUI 60fps·센서 원본 ~3Hz 와 다름.                                │
 # │ [증상별] 위치튐→WINDOW↑ / ID스위칭→STRIDE↑·ASSIGN=hungarian·RECENT_FRAMES↑                                                          │
 # │          1명이여러명→FUSE_MIN_FRAMES↑·NOISE_RADIUS↑ / 인원수깜빡→DWELL=1                                                            │
 # │ [ReID] 가까웠다멀어진뒤 새 ID로 바뀜(먹혔다 재등장)→REID_DIST↑·REID_MAX_GAP↑ (NOISE_RADIUS 와 독립)                                 │
@@ -19,7 +19,7 @@
 # │                                                                                                                                     │
 # │ ● 윈도·노이즈  ← 그룹 전체 ★ (이번에 추가된 노이즈 억제 파이프라인)                                                                 │
 # │ ★ WINDOW            최근 N프레임 median 스무딩(실사용 8~12).   ↑ 노이즈↓·지연↑  ↓ 반응↑·노이즈↑                                     │
-# │ ★ STRIDE            N프레임마다 1회 추론(출력주기=FUSE_HZ/STRIDE).   ↑ 안정↑·반응↓  ↓ 반응↑·요동↑                                   │
+# │ ★ STRIDE            N프레임마다 1회 추론(출력주기=스텝주기×STRIDE).   ↑ 안정↑·반응↓  ↓ 반응↑·요동↑                                  │
 # │ ★ FUSE_MIN_FRAMES   창에서 이 횟수 미만 등장=유령 버림.   ↑ 유령↓·엄격(진짜도 놓칠↑)  ↓ 관대(유령 통과↑)                            │
 # │ ★ MOVE_MIN          이동이 이 mm 넘을 때만 '방향' 인정.   ↑ 가짜방향↓(느린이동 방향무시)  ↓ 방향 민감(가짜방향↑)                    │
 # │ ★ NOISE_RADIUS      확정포인트 이 반경(mm)내 '처음보는' 갑툭튀=흡수(GUI 원,0=끔).   ↑ 흡수↑(유령↓)  ↓ 약함 (ReID 재등장은 흡수 예외)│
@@ -48,7 +48,7 @@
 # │   MAX_SPEED         사람 최대 속도 상한(mm/s).   ↑ 빠른이동 허용(스파이크 통과↑)  ↓ 빡셈(빠른이동 잘림)                             │
 # │   PRED_DT_CAP       예측 이동 dt 상한(초).   ↑ 공백시 예측 크게 전진(튐↑)  ↓ 보수적                                                 │
 # │   TRAIL_LEN         궤적 길이(점 개수).   ↑ 꼬리 길게  ↓ 짧게 (표시만)                                                              │
-# │   FUSE_HZ           융합 처리 주파수(Hz)·window/stride '프레임' 기준.   ↑ 자주 처리(반응↑·CPU↑)  ↓ 드물게                           │
+# │   INTERVAL_SECOND    융합 스텝 간격(초)·window/stride '프레임' 기준(제품과 같은 값 필수).   ↓ 자주(반응↑·CPU↑)  ↑ 드물게            │
 # │ ● GUI 표시(이 스크립트 전용 · 원래 표시값)                                                                                          │
 # │   LERP              화면 위치 보간(0~1).   ↑(1쪽) 즉시 스냅(딱딱)  ↓(작게) 부드럽·느림                                              │
 # │   VEC_SCALE         속도벡터 화살표 길이 배율.   ↑ 화살표 길게  ↓ 짧게 (표시만)                                                     │
@@ -73,7 +73,16 @@ MAX_MISS=1.2;       MAX_MISS_TENT=0.5;  DWELL=1;            DWELL_ENTER=0.4
 REID_DIST=700;      REID_MAX_GAP=3.0
 # 필터 게인·기타
 ALPHA=0.45;         BETA=0.20;          MAX_SPEED=3500;     PRED_DT_CAP=0.3
-TRAIL_LEN=48;       FUSE_HZ=15
+TRAIL_LEN=48
+# 융합 스텝 간격(초) — 제품(Product-AI-mono `vanguard_mmwave`)의 OD_TIME_INTERVAL_SECOND 와 같은 뜻.
+#   0.1초마다 스냅샷 1개 = 융합 1스텝. WINDOW/STRIDE/QUEUE_SIZE/RECENT_FRAMES/FUSE_MIN_FRAMES 는
+#   '프레임 수' 라 이 값이 곧 그 파라미터들의 시간 단위다(WINDOW=10 → 0.1초면 1.0초 창).
+#   ⚠ run_optimization.sh 의 INTERVAL_SECOND 와 같은 값이어야 합니다 — 다르면 튜닝된 최적값의
+#     시간 폭이 실행 때 달라집니다. (예전 값은 FUSE_HZ=15 → INTERVAL_SECOND=0.0667 에 해당)
+#     PARAMS_FILE 이 있으면 그 파일에 적힌 '튜닝에 쓴 간격'이 이 값을 덮어써 자동으로 맞춰줍니다.
+#   ⚠ CLI 로 덮어쓸 때는 --interval-sec 를 쓰세요. --fuse-hz 는 이 값(초)에 밀려 무시됩니다
+#     (초가 Hz 보다 우선 — fusion.apply_fusion_opts). 예) ./run_gui.sh --interval-sec 0.0667
+INTERVAL_SECOND=0.1
 # GUI 표시
 LERP=0.30;          VEC_SCALE=700
 # 장기체류 경보: 한 사람(ID)이 이 시간(초) 이상 머물면 화면 빨간 테두리 + 그 사람 빨간 표시 + 알림음.
@@ -96,7 +105,10 @@ done
 
 # 최적화 결과 파일이 지정되면 그 값으로 위 설정을 덮어씀 (변수명은 run_gui.sh 와 동일).
 #   .yaml/.yml → 플랫 YAML(KEY: v) 파싱, 그 외 → NAME=VALUE 를 source(하위호환).
-#   FUSE_HZ/LERP/VEC_SCALE 는 파일에 없어 위 기본값 유지.
+#   ★ INTERVAL_SECOND 는 optimize_fusion.py 가 '튜닝에 쓴 간격'을 `_interval_second` 키로 함께
+#     적으므로, 파일이 있으면 그 값으로 자동 동기화된다(= 튜닝 조건 그대로 재생).
+#     ('_' 접두는 같은 파일을 먹는 제품이 그 키를 조용히 무시하게 하려는 것 — optimize_fusion.py 참조)
+#     LERP/VEC_SCALE 는 파일에 없어 위 기본값 유지.
 if [ -n "$PARAMS_FILE" ]; then
   if [ -f "$PARAMS_FILE" ]; then
     echo "[params] 설정 불러오기: $PARAMS_FILE  (위 기본값을 덮어씀)"
@@ -108,10 +120,13 @@ if [ -n "$PARAMS_FILE" ]; then
           _key="${_line%%:*}"; _val="${_line#*:}"
           _key="$(printf '%s' "$_key" | tr -d '[:space:]')"          # 키 공백 제거
           _val="${_val#"${_val%%[![:space:]]*}"}"; _val="${_val%"${_val##*[![:space:]]}"}"  # 값 trim
+          # 튜닝 조건 키는 '_' 접두(제품이 조용히 무시하도록) → 여기서 설정 변수명으로 되살린다
+          if [ "$_key" = "_interval_second" ]; then _key=INTERVAL_SECOND; fi
           case "$_key" in [A-Z]*) printf -v "$_key" '%s' "$_val";; esac
         done < "$PARAMS_FILE"
         ;;
-      *) source "$PARAMS_FILE";;
+      *) source "$PARAMS_FILE"                          # 하위호환(NAME=VALUE)
+         if [ -n "${_interval_second:-}" ]; then INTERVAL_SECOND="$_interval_second"; fi;;
     esac
   else
     echo "[params] 경고: 파일이 없어 기본 설정으로 실행합니다 → $PARAMS_FILE"
@@ -119,7 +134,7 @@ if [ -n "$PARAMS_FILE" ]; then
 fi
 
 FUSION_ARGS=(
-  --fuse-hz "$FUSE_HZ"
+  --interval-sec "$INTERVAL_SECOND"
   --window "$WINDOW" --stride "$STRIDE" --fuse-min-frames "$FUSE_MIN_FRAMES"
   --move-min "$MOVE_MIN" --noise-radius "$NOISE_RADIUS" --recent-frames "$RECENT_FRAMES"
   --jump-factor "$JUMP_FACTOR"

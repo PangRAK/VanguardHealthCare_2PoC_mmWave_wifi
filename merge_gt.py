@@ -20,6 +20,8 @@
       참 위치가 collision_mm 안이면 그들의 '센서별' 검출을 한 점(평균)으로 합쳐 실제 병합을 모사한다.
       → 다시 멀어지면 점이 둘로 갈라지고, 되살아난 점이 새 ID 가 되는지/ReID 로 옛 ID 를 지키는지까지
       채점 가능해진다. (같은 collision_mm 로 채점 시 그 겹침 구간은 개인별 채점에서 제외 — R2)
+  R7. 샘플링 간격(interval_sec, 기본 0.1초): 겹치기 '전'에 로그별로 그 간격 격자로 재샘플(ZOH)해
+      제품(vanguard_mmwave)의 융합 스텝 주기와 일치시킨다. 0 이면 기록 주파수 그대로.
 """
 from __future__ import annotations
 
@@ -27,7 +29,7 @@ import json
 import math
 import os
 
-from optimize_fusion import load_log, presence_class
+from optimize_fusion import describe_resample, load_log, presence_class, resample_frames
 
 
 def _collision_groups(present_gs, positions, collision_mm):
@@ -91,9 +93,16 @@ def _sensor_geom(header):
 
 
 def build_gt(paths, *, margin_deg, margin_mm, collision_mm=0.0,
-             merge_collisions=True, gt_out=None):
+             merge_collisions=True, gt_out=None, interval_sec=0.1):
     """단일-인물 로그 경로 N개 → GT dict. (검증 실패 시 SystemExit)
-    collision_mm>0 & merge_collisions=True 이면 R6(센서 병합 모사) 적용."""
+    collision_mm>0 & merge_collisions=True 이면 R6(센서 병합 모사) 적용.
+
+    R7. interval_sec>0(기본 0.1초) 이면 각 로그를 그 간격 격자로 재샘플(ZOH)한 뒤 겹친다
+        → 제품(vanguard_mmwave)의 OD_TIME_INTERVAL_SECOND 와 같은 융합 스텝 주기가 된다
+        (근거·동작은 optimize_fusion.resample_frames 참조).
+        재샘플은 '겹치기 전'에 로그별로 한다. 그래야 R5(프레임 인덱스 정렬)의 같은 인덱스가
+        로그마다 같은 경과시간을 뜻하고, 채택 타임라인(로그0의 t)도 정확히 interval 등간격이 된다.
+        interval_sec=0 이면 재샘플 없이 기록 주파수 그대로(옛 동작)."""
     if len(paths) < 2:
         raise SystemExit("--gt-logs 에는 최소 2개의 로그가 필요합니다.")
     logs = []
@@ -101,6 +110,10 @@ def build_gt(paths, *, margin_deg, margin_mm, collision_mm=0.0,
         h, fr = load_log(p)
         if not fr:
             raise SystemExit(f"빈 기록: {p}")
+        if interval_sec and interval_sec > 0:                          # R7
+            rs = resample_frames(fr, interval_sec)
+            print("[GT] 재샘플 " + describe_resample(os.path.basename(p), fr, rs, interval_sec))
+            fr = rs
         logs.append((p, h or {}, fr))
 
     # R1: fuse_hz + 센서 배치 동일성
@@ -117,7 +130,10 @@ def build_gt(paths, *, margin_deg, margin_mm, collision_mm=0.0,
     N = len(logs)
     L = min(len(fr) for _, _, fr in logs)          # R5: 최단 길이로 절단
     labels = [os.path.basename(p) for p, _, _ in logs]
-    print(f"[GT] {N}인 합성 · 길이 {L}프레임(최단 기준) · fuse_hz={fz0}")
+    step_hz = (1.0 / interval_sec) if interval_sec and interval_sec > 0 else fz0
+    step_txt = (f"스텝 {interval_sec:.3f}s({step_hz:.1f}Hz, 재샘플)"
+                if interval_sec and interval_sec > 0 else f"스텝 = 기록 fuse_hz({fz0}Hz)")
+    print(f"[GT] {N}인 합성 · 길이 {L}프레임(최단 기준) · fuse_hz={fz0} · {step_txt}")
     for g, (p, _, fr) in enumerate(logs):
         print(f"     사람{g}: {labels[g]} ({len(fr)}프레임 → {L}로 절단)")
 
@@ -176,6 +192,10 @@ def build_gt(paths, *, margin_deg, margin_mm, collision_mm=0.0,
               "융합층 스트레스 테스트로는 유효하나 센서 단 현실성은 벗어남.")
 
     gt = {"n": N, "labels": labels, "fuse_hz": fz0, "length": L,
+          # step_hz = 실제 replay 스텝 주파수(재샘플하면 1/interval, 아니면 기록 fuse_hz).
+          # 영상 fps·프레임계 파라미터의 시간 환산은 fuse_hz 가 아니라 이 값을 봐야 한다.
+          "interval_sec": (interval_sec if interval_sec and interval_sec > 0 else None),
+          "step_hz": step_hz,
           "frames": frames, "cls": cls, "positions": positions, "tid2gt": tid2gt,
           "base_hp": dict(logs[0][1].get("hyperparams_after_record") or {}),
           "sensors": logs[0][1].get("sensors", [])}   # 배치(replay 영상 렌더용)

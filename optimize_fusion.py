@@ -10,7 +10,14 @@ run_debug_gui.sh 가 남긴 원시 기록(JSONL)을 읽어, 그 안의 dets(융�
 핵심 전제
   · 기록은 '한 사람'이 돌아다닌 것 → 이상적으로는 하나의 ID 로만 추적돼야 한다.
   · dets/t 만 있으면 FusionTracker 결과가 결정적으로 재현되므로, 같은 기록을 다른 HP 로
-    돌려 오프라인 비교가 가능하다(FUSE_HZ 는 기록 시 고정 — replay 로는 못 바꿈).
+    돌려 오프라인 비교가 가능하다.
+
+샘플링 간격(--interval-sec, 기본 0.1초)
+  기록은 fuse_hz(예 15Hz) 격자지만, 제품(Product-AI-mono `vanguard_mmwave`)은 0.1초마다
+  hub.snapshot() 을 떠서 융합을 1스텝 돌린다(OD_TIME_INTERVAL_SECOND). 스텝 주기가 다르면
+  WINDOW/STRIDE/QUEUE_SIZE/RECENT_FRAMES/FUSE_MIN_FRAMES 같은 '프레임 수' 파라미터의 실제
+  시간 폭이 달라져 여기서 찾은 값이 제품에서 다른 의미가 된다. 그래서 채점 전에 로그를 그
+  간격으로 재샘플(ZOH)한다 → resample_frames(). 0 을 주면 옛 동작(기록 그대로).
 
 스위칭 채점(사용자 규칙 반영)
   · OUT   : 어떤 센서도 검출 못함(장소 완전 이탈). exit-gap 이상 지속 후 복귀 시 ID 바뀌어도 OK.
@@ -35,31 +42,62 @@ from fusion import FusionTracker, NAME2KW, replay_frames
 KW2NAME = {v: k for k, v in NAME2KW.items()}
 
 # 탐색 공간 (친화 이름 → 후보값 목록). --fix 로 고정된 것은 자동 제외.
+#
+# ★ 후보 범위 확장 (INTERVAL_SECOND=0.1 재샘플 도입 후)
+#   0.1초 기준 튜닝 결과에서 탐색 22개 중 10개가 **정확히 최댓값**(WINDOW·NOISE_RADIUS·
+#   RECENT_FRAMES·JUMP_FACTOR·DIR_PEN·QUEUE_SIZE·REID_DIST·REID_MAX_GAP·MAX_MISS·ALPHA),
+#   4개가 최솟값(MOVE_MIN·ANG_GATE·COAST_DECAY·PRED_DT_CAP)에 붙었다 = "더 가고 싶은데 목록이
+#   끝난" 상태 → 경계에 걸린 항목만 그 방향으로 넓혔다. 경계가 아닌 항목은 그대로 둔다
+#   (후보를 늘리면 좌표하강 1라운드 비용이 후보 수에 비례해 늘기 때문).
+#
+#   넓히지 '않은' 상한은 물리/논리 제약이다:
+#     · ALPHA ≤ 1.0        — 잔차 반영률(1.0 = 측정 100% 추종). 넘으면 발산.
+#     · COAST_DECAY ≥ 0.0  — 속도 감쇠율(0 = 즉시 정지).
+#     · PRED_DT_CAP ≥ 0.1  — 스텝 주기(INTERVAL_SECOND)보다 작으면 매 스텝이 클램프된다.
+#     · REID_MAX_GAP < 8.0 — run_optimization.sh 의 DWELL_GAP(기본 8.0)보다 작아야 한다.
+#                            (그 안의 ReID 실패를 체류결손으로 채점하는 전제) 더 늘리려면
+#                            DWELL_GAP 도 같이 올려야 한다.
+#
+#   ⚠ 채점 함수에 없는 위험은 사람이 봐야 한다 — 벌점은 스위칭/중복/교차병합/커버리지/체류결손
+#     뿐이므로 아래 항목은 "점수는 좋아지는데 현장에서 나빠지는" 방향으로 끌릴 수 있다.
+#     최적 결과가 이 값들의 상단을 고르면 compare.mp4 로 눈으로 확인할 것:
+#       · WINDOW      지연이 점수에 안 잡힌다. 0.1초 기준 30 = 3.0초 스무딩 창.
+#       · NOISE_RADIUS 확정점 반경 내 '처음 보는' 점을 흡수 → 크면 **두 번째 사람**을 유령으로
+#                      삼킬 수 있다(3000mm = 방 전체). 재실 카운트 누락 위험.
+#       · REID_DIST    센서 병합 한계(~0.7m)를 넘는 값은 문 근처에서 '다른 사람'이 나간 사람
+#                      ID 를 가로챌 위험이 커진다(교차병합 벌점이 3개 로그로는 다 못 잡는다).
+#       · MAX_MISS     안 보여도 트랙을 유지하는 시간 → 잔상·인원 과다. 제품에선 체류시간이
+#                      사람이 나간 뒤 이 값만큼 더 늘어난다(알람 임계 판정에 직접 영향).
 SPACE = {
-    "WINDOW": [3, 5, 8, 10, 12, 15, 20],
+    "WINDOW": [3, 5, 8, 10, 12, 15, 20, 25, 30],        # ↑확장(0.1초 기준 30 = 3.0초 창)
     "STRIDE": [1, 2, 3, 4],
     "FUSE_MIN_FRAMES": [1, 2, 3, 4, 6, 8],
-    "MOVE_MIN": [100.0, 150.0, 200.0, 250.0, 300.0, 400.0],
-    "NOISE_RADIUS": [0.0, 300.0, 500.0, 800.0, 1000.0, 1500.0, 2000.0],
-    "RECENT_FRAMES": [1, 2, 3, 4, 6],
-    "JUMP_FACTOR": [1.0, 1.5, 2.0, 3.0],
+    "MOVE_MIN": [50.0, 75.0, 100.0, 150.0, 200.0, 250.0, 300.0, 400.0],   # ↓확장
+    "NOISE_RADIUS": [0.0, 300.0, 500.0, 800.0, 1000.0, 1500.0, 2000.0,
+                     2500.0, 3000.0],                   # ↑확장(⚠ 2인 흡수 위험 — 위 주석)
+    "RECENT_FRAMES": [1, 2, 3, 4, 6, 8, 10, 12],        # ↑확장(0.1초 기준 4틱 ≈ 센서 1주기 383ms)
+    "JUMP_FACTOR": [1.0, 1.5, 2.0, 3.0, 4.0, 5.0],      # ↑확장
     "ASSIGN": ["greedy", "hungarian"],
     "GATE_MM": [500.0, 650.0, 750.0, 900.0, 1100.0, 1300.0, 1500.0],
-    "DIR_PEN": [0.0, 60.0, 120.0, 200.0, 300.0],
-    "ANG_GATE": [45.0, 60.0, 75.0, 90.0, 110.0],
+    "DIR_PEN": [0.0, 60.0, 120.0, 200.0, 300.0, 450.0, 600.0],   # ↑확장(GATE_MM 대비 비용)
+    "ANG_GATE": [20.0, 30.0, 45.0, 60.0, 75.0, 90.0, 110.0],     # ↓확장
     "MERGE_MM": [300.0, 450.0, 550.0, 700.0, 900.0, 1200.0],
     "COAST_GROW": [0.0, 150.0, 350.0, 600.0, 1000.0],
-    "COAST_DECAY": [0.5, 0.7, 0.85, 0.95, 1.0],
-    "QUEUE_K": [1, 2, 3, 4, 5],
-    "QUEUE_SIZE": [3, 5, 7, 10],
-    "REID_DIST": [0.0, 500.0, 800.0, 1200.0, 1800.0],   # 재식별 위치 임계(mm), 0=끔
-    "REID_MAX_GAP": [1.5, 2.5, 4.0, 6.0],               # 재식별 시간 임계(초, max_miss 초과분만 유효)
-    "MAX_MISS": [0.5, 1.0, 1.5, 2.0, 3.0, 5.0],
+    "COAST_DECAY": [0.0, 0.25, 0.5, 0.7, 0.85, 0.95, 1.0],       # ↓확장(0 = 즉시 감속)
+    "QUEUE_K": [1, 2, 3, 4, 5, 7, 10],                  # ↑확장 — QUEUE_SIZE 확장에 맞춰 같은
+                                                        #   K/SIZE 비율이 계속 도달 가능하도록
+                                                        #   (초과분은 min 으로 클램프)
+    "QUEUE_SIZE": [3, 5, 7, 10, 15, 20],                # ↑확장(0.1초 기준 20 = 2.0초 이력)
+    "REID_DIST": [0.0, 500.0, 800.0, 1200.0, 1800.0,
+                  2500.0],                              # 재식별 위치 임계(mm), 0=끔 (⚠ 위 주석)
+    "REID_MAX_GAP": [1.5, 2.5, 4.0, 6.0, 7.5],          # 재식별 시간 임계(초, max_miss 초과분만
+                                                        #   유효). 상한은 DWELL_GAP(8.0) 미만
+    "MAX_MISS": [0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.0],    # ↑확장(⚠ 체류시간 부풀림 — 위 주석)
     "MAX_MISS_TENT": [0.3, 0.5, 0.8, 1.2],
-    "ALPHA": [0.3, 0.45, 0.6, 0.8],
+    "ALPHA": [0.3, 0.45, 0.6, 0.8, 0.9, 1.0],           # ↑확장(1.0 = 하드 상한)
     "BETA": [0.1, 0.2, 0.35],
     "MAX_SPEED": [2500.0, 3500.0, 5000.0],
-    "PRED_DT_CAP": [0.2, 0.3, 0.5],
+    "PRED_DT_CAP": [0.1, 0.15, 0.2, 0.3, 0.5],          # ↓확장(0.1 = 스텝 주기)
 }
 
 
@@ -77,6 +115,64 @@ def load_log(path):
             else:
                 frames.append(o)
     return header, frames
+
+
+def native_hz(frames):
+    """기록의 원래 프레임 주파수(Hz) 추정 — 재샘플 안내 출력용. 산출 불가면 None."""
+    if len(frames) < 2:
+        return None
+    span = frames[-1]["t"] - frames[0]["t"]
+    return (len(frames) - 1) / span if span > 0 else None
+
+
+def resample_frames(frames, interval_sec):
+    """기록 프레임 → interval_sec 간격 격자로 재샘플(ZOH). 제품과 같은 융합 스텝 주기로 replay.
+
+    제품(Product-AI-mono `vanguard_mmwave`)은 source.py 가 OD_TIME_INTERVAL_SECOND(기본 0.1초)
+    마다 hub.snapshot() 을 떠서 융합을 1스텝 돌린다. 즉 융합 입력은 '그 시점의 최신 센서값'이고
+    (ZOH — 새 값이 안 왔으면 직전 값이 그대로 중복 입력됨), 스텝 주기는 폴링 간격이 정한다.
+    반면 기록 로그는 fuse_hz(예 15Hz) 격자다. 그대로 replay 하면 스텝 주기가 제품과 달라서,
+    '프레임 수' 로 정의된 파라미터(WINDOW/STRIDE/QUEUE_SIZE/RECENT_FRAMES/FUSE_MIN_FRAMES)의
+    실제 시간 폭이 어긋난다 → 여기서 찾은 최적값이 제품에서는 다른 뜻이 된다(WINDOW=10 이
+    15Hz 에선 0.67초, 10Hz 에선 1.0초). 그래서 채점 전에 제품과 같은 간격으로 다시 뽑는다.
+
+    각 tick t_k = t0 + k·interval 에 대해 t ≤ t_k 인 마지막 프레임을 고르고, t 는 tick 시각으로
+    바꾼다(= 제품의 폴링 시각). 그래야 트래커가 보는 dt 까지 제품과 같은 일정 간격이 된다.
+    interval 이 로그 간격보다 촘촘하면 프레임이 중복되고(제품에서도 정상 — 센서는 ~383ms 마다만
+    갱신되므로 기록도 78~92% 가 중복), 넓으면 사이 프레임이 버려진다.
+    격자는 기록 구간 [t0, t_end] 안에만 만든다(기록이 끝난 뒤의 폴링 시각을 만들어내지 않는다)
+    → 마지막 tick 이후의 꼬리는 버려지는데, tick 간격이 interval 이므로 손실은 항상 < interval.
+    interval_sec<=0 이면 재샘플 없이 기록 그대로(옛 동작)."""
+    if not frames or not interval_sec or interval_sec <= 0:
+        return list(frames)
+    t0, t_end = frames[0]["t"], frames[-1]["t"]
+    out, i, k = [], 0, 0
+    while True:
+        tg = t0 + k * interval_sec
+        if tg > t_end + 1e-9:
+            break
+        while i + 1 < len(frames) and frames[i + 1]["t"] <= tg + 1e-9:
+            i += 1
+        out.append({**frames[i], "t": tg})   # 얕은 복사 — raw/dets 는 읽기만 하므로 공유 OK
+        k += 1
+    return out
+
+
+def _interval_note(interval_sec):
+    """결과 파일 머리주석 — 이 값이 곧 프레임계 파라미터의 시간 단위이므로 반드시 함께 남긴다."""
+    if interval_sec and interval_sec > 0:
+        return (f"샘플링 간격 INTERVAL_SECOND={interval_sec}s ({1.0 / interval_sec:.1f}Hz) 기준 "
+                f"— run_gui.sh 도 같은 값이어야 WINDOW/STRIDE/QUEUE_SIZE 등 '프레임' 파라미터의 "
+                f"시간 폭이 일치합니다")
+    return "샘플링 재샘플 없음(기록 주파수 그대로) — 프레임 파라미터의 시간 폭이 기록 fuse_hz 기준"
+
+
+def describe_resample(label, src_frames, out_frames, interval_sec):
+    """재샘플 결과 한 줄 안내(원래 주파수 → 틱 수/간격)."""
+    hz = native_hz(src_frames)
+    src_hz = f"{hz:.1f}Hz 상당" if hz else "주파수 불명"
+    return (f"{label}: {len(src_frames)}프레임({src_hz}) → {len(out_frames)}틱 "
+            f"@ {interval_sec:.3f}s({1.0 / interval_sec:.1f}Hz)")
 
 
 def cast(v):
@@ -472,8 +568,16 @@ def run_search(active, base, evaluate, iters, cd_rounds, seed):
     return best_score, best_choice, best_bd, samples
 
 
-def save_params(final, active, fixed, out_path, comment_lines):
-    """최적 파라미터를 콘솔 출력 + (있으면) sh 스니펫 저장. 단일/다중 공용."""
+def save_params(final, active, fixed, out_path, comment_lines, interval_sec=None):
+    """최적 파라미터를 콘솔 출력 + (있으면) sh 스니펫 저장. 단일/다중 공용.
+
+    interval_sec 을 주면 `_interval_second` 키로도 **기계 판독 가능하게** 함께 저장한다
+    (주석은 yaml.safe_load 가 버리므로 소비자가 검증할 수 없다). 이 값이 곧 프레임계
+    파라미터의 시간 단위라, 파일 하나만 넘겨도 튜닝 조건이 함께 따라가야 성능이 재현된다:
+      · run_gui.sh — PARAMS_FILE 로더가 읽어 INTERVAL_SECOND 를 자동 동기화(튜닝 조건 그대로 재생).
+      · 제품(vanguard_mmwave) — '_' 접두라 fusion_params 가 조용히 무시(경고 없음).
+        제품에서도 대조하려면 그쪽 fusion_params 가 이 키를 읽어 실제 스냅샷 주기와
+        비교하면 된다(현재 제품 코드는 미구현 — 값만 파일에 남겨 둔다)."""
     print("최적 파라미터 (run_gui.sh 값으로 사용):")
     lines = []
     for n in NAME2KW:
@@ -497,6 +601,12 @@ def save_params(final, active, fixed, out_path, comment_lines):
                     if isinstance(v, bool):
                         v = 1 if v else 0
                     fh.write(f"{n}{sep}{v}\n")
+            if interval_sec and interval_sec > 0:   # FusionTracker 인자가 아니라 '튜닝 조건'
+                # 키 이름의 '_' 접두는 의도적이다. 제품(vanguard_mmwave)의 fusion_params 는
+                # '_' 로 시작하는 키를 주석용으로 보고 조용히 건너뛰므로(FusionTracker 인자
+                # 목록에 없는 대문자 키였다면 매 기동마다 "알 수 없는 융합 파라미터" 경고가
+                # 남는다), 제품 코드를 건드리지 않고도 파일을 그대로 먹일 수 있다.
+                fh.write(f"_interval_second{sep}{interval_sec}\n")
         print(f"\n저장: {out_path}")
 
 
@@ -674,6 +784,10 @@ def main():
                     default=True, help="[다중] 센서 병합 모사(R6) 끄기 — 겹쳐도 점 2개 유지(옛 동작)")
     ap.add_argument("--w-xmerge-ep", type=float, default=2000.0, help="교차-인물 병합 에피소드 벌점")
     ap.add_argument("--w-xmerge-fr", type=float, default=50.0, help="교차-인물 병합 프레임당 벌점")
+    ap.add_argument("--interval-sec", type=float, default=0.1,
+                    help="샘플링(융합 스텝) 간격(초). 기록 로그를 이 간격 격자로 재샘플(ZOH)해 "
+                         "replay → 제품(vanguard_mmwave) OD_TIME_INTERVAL_SECOND 와 같은 조건에서 "
+                         "채점. 기본 0.1. 0 이면 재샘플 없이 기록 주파수 그대로(옛 동작)")
     ap.add_argument("--gt-out", default=None, help="병합된 다중-인물 GT 를 jsonl 로 저장(선택)")
     ap.add_argument("--corr-out", default=None,
                     help="[다중] HP↔score 상관계수(csv) + 상관/성능개선 그림(svg)을 이 폴더에 저장")
@@ -757,7 +871,7 @@ def main():
         from merge_gt import build_gt
         gt = build_gt(args.gt_logs, margin_deg=args.margin_deg, margin_mm=args.margin_mm,
                       collision_mm=args.collision_mm, merge_collisions=args.merge_collisions,
-                      gt_out=args.gt_out)
+                      gt_out=args.gt_out, interval_sec=args.interval_sec)
         base = dict(gt["base_hp"]); base.pop("fuse_hz", None)
         resolve = make_resolve(base)
         cache = {}
@@ -814,8 +928,10 @@ def main():
         save_params(final, active, fixed, args.out,
                     [f"optimize_fusion.py 다중-인물 결과 (score={best_score:.1f})",
                      f"GT: {' + '.join(gt['labels'])} ({gt['n']}인, {gt['length']}프레임)",
+                     _interval_note(args.interval_sec),
                      f"교차병합 ep {bd_base['xmerge_ep']}→{best_bd['xmerge_ep']}, "
-                     f"sw_in {bd_base['sw_in']}→{best_bd['sw_in']}"])
+                     f"sw_in {bd_base['sw_in']}→{best_bd['sw_in']}"],
+                    interval_sec=args.interval_sec)
         return 0
 
     # =====================================================================
@@ -824,6 +940,11 @@ def main():
     header, frames = load_log(args.log)
     if not frames:
         print("기록에 프레임이 없습니다."); return 1
+    if args.interval_sec and args.interval_sec > 0:      # 제품과 같은 스텝 주기로 재샘플(ZOH)
+        resampled = resample_frames(frames, args.interval_sec)
+        print("[샘플링] " + describe_resample(
+            os.path.basename(args.log), frames, resampled, args.interval_sec))
+        frames = resampled
     base = dict((header or {}).get("hyperparams_after_record") or {})
     base.pop("fuse_hz", None)
     resolve = make_resolve(base)
@@ -873,8 +994,10 @@ def main():
     print("=" * 70)
     save_params(final, active, fixed, args.out,
                 [f"optimize_fusion.py 결과 (score={best_score:.1f})",
+                 _interval_note(args.interval_sec),
                  f"라이브 sw_in={bd_live['sw_in']} n_ids={bd_live['n_ids']} → "
-                 f"최적 sw_in={best_bd['sw_in']} n_ids={best_bd['n_ids']}"])
+                 f"최적 sw_in={best_bd['sw_in']} n_ids={best_bd['n_ids']}"],
+                interval_sec=args.interval_sec)
     return 0
 
 

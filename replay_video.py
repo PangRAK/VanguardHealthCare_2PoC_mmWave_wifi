@@ -93,7 +93,11 @@ def main():
     ap.add_argument("--gt-logs", nargs="+", required=True, help="단일-인물 로그 N개(≥2)")
     ap.add_argument("--best-params", required=True, help="best_params.yaml/.sh (오른쪽=최적화 후)")
     ap.add_argument("--out", default="debug_logs/compare.mp4")
-    ap.add_argument("--fps", type=float, default=None, help="영상 fps(기본=fuse_hz)")
+    ap.add_argument("--fps", type=float, default=None,
+                    help="영상 fps(기본=replay 스텝 주파수 = 1/interval-sec, 재샘플 없으면 fuse_hz)")
+    ap.add_argument("--interval-sec", type=float, default=0.1,
+                    help="샘플링(융합 스텝) 간격(초) — 최적화와 같은 값을 줘야 영상이 채점된 "
+                         "입력과 일치. 기본 0.1. 0=재샘플 없음(기록 그대로)")
     ap.add_argument("--frame-stride", type=int, default=1, help="N프레임마다 1장 렌더(↑빠름·거침)")
     ap.add_argument("--margin-deg", type=float, default=55.0)
     ap.add_argument("--margin-mm", type=float, default=5000.0)
@@ -112,10 +116,12 @@ def main():
         os.makedirs(out_dir, exist_ok=True)          # 분석 폴더 등 없으면 생성
 
     gt = build_gt(args.gt_logs, margin_deg=args.margin_deg, margin_mm=args.margin_mm,
-                  collision_mm=args.collision_mm, merge_collisions=args.merge_collisions)
+                  collision_mm=args.collision_mm, merge_collisions=args.merge_collisions,
+                  interval_sec=args.interval_sec)
     base = dict(gt["base_hp"]); base.pop("fuse_hz", None)
     best = load_params(args.best_params)
-    fps = args.fps or gt.get("fuse_hz") or 15.0
+    # 재샘플했으면 프레임 간격이 interval-sec 이므로 fps 는 step_hz(=1/interval) 여야 실시간 속도가 맞다
+    fps = args.fps or gt.get("step_hz") or gt.get("fuse_hz") or 15.0
     W = args.width - (args.width % 2); H = args.height - (args.height % 2)   # libx264: 짝수
 
     print(f"[video] replay: base(전) / best(후) · {gt['length']}프레임 · {fps}fps")

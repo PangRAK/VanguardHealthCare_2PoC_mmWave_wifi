@@ -8,6 +8,9 @@
 #   GT 를 만들고, dets(융합 입력) 스트림을 여러 HP 로 replay 하며 채점 → 스위칭/교차병합이 최소인
 #   조합을 찾는다. (replay 는 라이브와 100% 동일 재현이라 오프라인 최적화가 유효)
 #
+# ※ 샘플링 간격: INTERVAL_SECOND(기본 0.1초) 마다 하나씩 뽑아(ZOH) replay 한다 — 제품
+#   (Product-AI-mono `vanguard_mmwave`)의 OD_TIME_INTERVAL_SECOND 와 같은 조건. 아래 설정 참조.
+#
 # 채점 규칙:
 #   · OUT(전 센서 미검출)로 EXIT_GAP 이상 이탈 후 복귀 → ID 바뀌어도 허용
 #   · 검출 중(최소 1센서) 또는 마진 안(±MARGIN_DEG°, MARGIN_MM mm)에서 다른 ID 로 교체·중복 → 금지(벌점)
@@ -32,6 +35,17 @@ if [ -n "$GT_DIR" ] && [ -d "$GT_DIR" ]; then
   shopt -u nullglob
   GT_LOGS="${GT_LOGS# }"                      # 앞쪽 공백 제거
 fi
+# ===== 샘플링 간격(초) — 제품과 같은 조건에서 튜닝하기 위한 핵심 값 =====
+#   기록 로그는 fuse_hz(예 15Hz) 격자지만, 제품(Product-AI-mono `vanguard_mmwave`)은
+#   source.py 가 OD_TIME_INTERVAL_SECOND(기본 0.1초)마다 hub.snapshot() 을 떠서 융합을
+#   1스텝 돌린다 → 융합 입력 = '그 시점의 최신 센서값'(새 값 없으면 중복), 스텝 주기 = 0.1초.
+#   그래서 채점 전에 로그를 이 간격으로 재샘플(ZOH)해 replay 한다.
+#   ★ 왜 중요한가: WINDOW/STRIDE/QUEUE_SIZE/RECENT_FRAMES/FUSE_MIN_FRAMES 는 '프레임 수' 라
+#     스텝 주기가 곧 시간 단위다(WINDOW=10 → 15Hz 에선 0.67초, 10Hz 에선 1.0초). 여기서
+#     15Hz 로 튜닝한 값을 0.1초로 도는 제품에 넣으면 의미가 달라진다.
+#   ⚠ run_gui.sh 의 INTERVAL_SECOND 와 같은 값으로 두세요(다르면 최적값의 시간 폭이 어긋남).
+#   0 으로 두면 재샘플 없이 기록 주파수 그대로(옛 동작).
+INTERVAL_SECOND=0.1
 COLLISION_MM=300    # 두 사람이 이 거리(mm) 내면 '겹침': (R6)센서 병합 모사로 한 점 합침 + (R2)그 구간 개인채점 제외
 MERGE_COLLISIONS=1  # 1=센서 병합 모사 켬(겹치면 한 점→멀어지면 갈라짐→ReID 채점 가능). 0=끔(겹쳐도 점 2개)
 #   ※ ReID 를 의미있게 튜닝하려면 동선이 서로 겹치도록 기록한 로그를 쓰고 MERGE_COLLISIONS=1 로 둘 것.
@@ -98,7 +112,7 @@ COMMON=(--iters "$ITERS" --cd-rounds "$CD_ROUNDS" --seed "$SEED"
 
 # 인자 조립: 공통 + 겹침/교차 관련. GT_LOGS 가 있으면 --gt-logs 추가.
 # (GT_LOGS 가 비어 있으면 CLI 의 --gt-logs/--log 를 기대 — 둘 다 없으면 optimize_fusion.py 가 안내 후 종료)
-ARGS=("${COMMON[@]}" --collision-mm "$COLLISION_MM"
+ARGS=("${COMMON[@]}" --collision-mm "$COLLISION_MM" --interval-sec "$INTERVAL_SECOND"
       --w-xmerge-ep "$W_XMERGE_EP" --w-xmerge-fr "$W_XMERGE_FR")
 if [ -n "$GT_LOGS" ]; then ARGS+=(--gt-logs $GT_LOGS); fi
 if [ "$MERGE_COLLISIONS" != "1" ]; then ARGS+=(--no-collision-merge); fi
@@ -143,8 +157,10 @@ fi
 # (GT_LOGS 로 구성한 다중-인물 모드 + best_params(OUT) 가 있을 때만)
 if [ -n "$GT_LOGS" ] && [ -n "$VIDEO_OUT" ] && [ -f "$OUT" ]; then
   echo ""; echo "[video] 최적화 전/후 비교 영상 생성 중… → $VIDEO_OUT"
+  # 채점과 '같은' 입력 스트림을 그리도록 interval-sec 도 함께 넘긴다(다르면 영상≠채점 장면)
   VID=(--gt-logs $GT_LOGS --best-params "$OUT" --out "$VIDEO_OUT"
-       --margin-deg "$MARGIN_DEG" --margin-mm "$MARGIN_MM" --collision-mm "$COLLISION_MM")
+       --margin-deg "$MARGIN_DEG" --margin-mm "$MARGIN_MM" --collision-mm "$COLLISION_MM"
+       --interval-sec "$INTERVAL_SECOND")
   if [ "$MERGE_COLLISIONS" != "1" ]; then VID+=(--no-collision-merge); fi
   if [ -n "$VIDEO_STRIDE" ]; then VID+=(--frame-stride "$VIDEO_STRIDE"); fi
   ./.venv/bin/python replay_video.py "${VID[@]}"
