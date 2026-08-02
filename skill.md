@@ -199,13 +199,15 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
         `assert_sensor_id_format`/`assert_no_legacy_schema`/`assert_unique_sensor_hosts`/
         `get_camera_ids`/`get_sensors_for_camera` 를 양쪽에 넣고, 카메라 해석을
         `source.resolve_camera_id()` 단일 경로로 통합했다(§5.1·§5.2).
-  - [ ] **★ HF(`PIA-SPACE-LAB/SensorData`)의 `epl_config.json` 을 새 id 규격으로 교체**
-        — 제품 `assets/` 는 **git 무시 대상**(`.gitignore:73`)이라 HF 가 유일한 배포
-        경로다. 교체 전까지 다른 머신/CI 는 옛 `rooms` 파일을 받아 **스트림 등록이
-        ValueError 로 거절**되고, 실자산 테스트 2개
-        (`test_real_epl_config` / `test_real_epl_config_ids_conform`)는 fail 이 아니라
-        **명시적 skip** 으로 그 사실을 알린다. 올릴 파일은 이 레포의 `epl_config.json`
-        과 같은 내용(`pia-1-1/2/3`)이다.
+  - [x] **★ HF(`PIA-SPACE-LAB/SensorData`)의 `epl_config.json` 을 새 id 규격으로 교체**
+        → **완료(2026-08-02)**. 제품 `assets/` 는 **git 무시 대상**(`.gitignore:73`)이라
+        HF 가 유일한 배포 경로였고, 교체 전까지 다른 머신/CI 는 옛 `rooms` 파일을 받아
+        스트림 등록이 ValueError 로 거절됐다. 올린 내용은 이 레포의 `epl_config.json`
+        과 같다(`pia-1-1/2/3`).
+        · 실자산 테스트 2개(`test_real_epl_config` / `test_real_epl_config_ids_conform`)의
+          **skip 분기는 그대로 남긴다** — 없앨 게 아니라 안 걸리는 게 정상이다. 누군가
+          옛 리비전을 가리키거나 다음 스키마 변경이 오면 다시 그 사실을 알려야 한다.
+          (로컬 자산이 옛 것이면 skip 이 아니라 **fail** 이다 — 방침 무변경.)
   - [x] ~~제품의 `AddStreamModel.cameraId` 가 `int` 라 비숫자 cameraId 가 매칭되지 않던
         문제~~ → **해소됨(2026-08-02)**: `cameraId` 는 문자열이고 백엔드가 JSON 숫자로
         보내도 DTO 경계(`coerce_camera_id`)에서 승격된다. 이제 `ward-a` 같은 값도 등록된다.
@@ -331,6 +333,12 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
     black·flake8 clean. 리플레이 회귀 **3/3 발화 유지**(peak 116.7 / 117.0 / 94.6s).
     이 레포는 프로비저닝 왕복 스모크(`upsert` → 순번 배정 → `save` → `load`/`get_sensors()`)로
     A-2 회귀를 막았다.
+  - **✅ HF 자산 교체 완료**: `PIA-SPACE-LAB/SensorData` 의 `epl_config.json` 을 새 id 규격
+    (`pia-1-1/2/3`)으로 올렸다 — 2026-07-31 부터 열려 있던 배포 게이트가 닫혔다(§10).
+    이제 다른 머신·CI 도 새 스키마를 받으므로 실자산 테스트가 skip 없이 돈다.
+    ※ skip 분기 자체는 남겨 둔다(옛 리비전을 가리키거나 다음 스키마 변경 때 다시 필요하다).
+  - **남은 게이트**: 현장 cameraId 로 교체 / 백엔드가 MQ `cameraId` 를 **문자열**로 받는지
+    확인(이번에 숫자 → 문자열로 바뀐 외부 계약이다) (§10).
 
 - **2026-07-31 (`rooms` 폐기 → 센서 id 규격화 `{organization}-{cameraId}-{sensorId}`)**
   - **왜**: 알람은 기존 레포 컨벤션대로 **카메라 단위**로 발화하고, MQ 봉투의 `cameraId` 는
@@ -384,7 +392,8 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
   - **남은 게이트**: HF 자산 교체 / 현장 cameraId 로 교체 / 백엔드가 cameraId·
     organization 을 내려주는지 확인 (§10).
     (당시엔 "**숫자** cameraId 로 교체" 였다 — 2026-08-02 에 `cameraId` 가 문자열이 되어
-     숫자 제약이 사라졌다. 현장 값으로 바꿔야 한다는 것 자체는 그대로다.)
+     숫자 제약이 사라졌다. 현장 값으로 바꿔야 한다는 것 자체는 그대로다.
+     **HF 자산 교체도 2026-08-02 에 완료**됐다 — §10 참조.)
 - **2026-07-30 (방(room)↔센서 매핑 도입 — 설치 도구 3종 + 설정 파일)**
   - 왜: 제품은 **방 단위(stream)로 재실/체류를 판정**하는데, `epl_config.json` 에 방 정보가
     없어 `get_sensors_for_room` 의 3순위 폴백(전 센서)이 걸리고 있었다. 방이 1곳인 지금은
