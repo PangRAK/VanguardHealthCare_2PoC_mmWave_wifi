@@ -63,7 +63,7 @@ from auto_positioning import (
 )
 from epl_config import (
     CONFIG_PATH, DEFAULT_CAMERA_ID, DEFAULT_ORGANIZATION, get_camera_ids,
-    get_sensors_for_camera, load_config,
+    get_sensors_for_camera, load_config, assert_camera_id_registerable,
 )
 
 
@@ -388,6 +388,13 @@ def main() -> int:
                   " 따로 실행하세요.")
             return 2
     if camera_id:
+        # 제품이 등록할 수 없는 cameraId 로 캘리브레이션하면 존재할 수 없는 카메라의 방
+        # 좌표를 맞추는 셈이다 — '센서 0개' 로 흘리지 않고 이유를 먼저 알린다.
+        try:
+            assert_camera_id_registerable(camera_id, source="--camera-id")
+        except ValueError as e:
+            print(f"❌ {e}")
+            return 2
         cfg = load_config()
         try:
             camera_sensors = get_sensors_for_camera(cfg, organization, camera_id)

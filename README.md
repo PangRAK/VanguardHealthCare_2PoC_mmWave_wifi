@@ -173,6 +173,7 @@ id = "{organization}-{cameraId}-{sensorId}"        예: "pia-1-1"
 |---|---|
 | 파싱 | `split("-", 2)` 3파트. `organization`/`cameraId` 파트에는 `-` 불가, `sensorId` 파트에는 허용(예: `pia-1-10-201-31-120`) |
 | 비교 | 세 파트 모두 불투명 문자열(숫자로 파싱하지 않음). 대조는 `normalize_id_value`(`strip().lower()`) **단일 기준** — 대소문자만 다른 id 는 **같은 id 로 보고 중복 처리**한다. 숫자 정규화는 없으므로 `"01"` 과 `"1"` 은 **다른** cameraId·sensorId 다 |
+| `cameraId` 파트 | **선행 0 없는 숫자**여야 한다. 제품의 `AddStreamModel.cameraId` 가 `int` 라서, 비숫자(`ward-a`)는 등록 요청이 거절되고 `01`·`6_0` 은 pydantic 이 조용히 `1`·`60` 으로 접는다 → 그 센서는 형식은 맞는데 **영원히 매칭 0개**다. `assert_camera_id_registerable()` 이 id 를 만들 때와 설정을 읽을 때 양쪽에서 막는다 |
 | `sensorId` | 생략하면 그 카메라에서 **아직 안 쓰인 최소 순번**이 결정적으로 배정된다(기기 유래 `spec_key` 정렬 — 배열 순서와 무관). **명시한 id 는 절대 재번호화하지 않는다.** 비숫자(`north`)·비연속·역순도 정상 동작하며, 순번은 관례일 뿐 기능적 순서가 아니다. 대신 어느 물리 센서인지는 `mac` 으로만 알 수 있다 |
 | 실패 | id 형식 위반·`id` 누락·id 중복·같은 host 중복·옛 `rooms` 스키마 → 제품이 **스트림 등록을 거절**한다 |
 
@@ -182,11 +183,12 @@ id = "{organization}-{cameraId}-{sensorId}"        예: "pia-1-1"
 - `x`/`y`/`heading_deg` 는 **방 좌표계** 값이고 카메라마다 별도의 방 좌표계다 →
   카메라마다 `./run_auto_positioning_v2.sh --camera-id <id>` 를 따로 돌려야 한다.
 - ★ 현장 설치 시 `cameraId` 파트를 **병원이 부여한 실제 cameraId** 로 교체해야 한다.
-  숫자일 필요는 없다 — 제품의 `AddStreamModel.cameraId` 는 **문자열**이고, 백엔드가 JSON
-  숫자로 보내도 DTO 경계에서 문자열로 승격된다. 교체하지 않으면 기본값 `1` 이 현장
-  카메라와 안 맞아 그 스트림은 센서 0개가 된다(= 체류 알람이 아예 안 나감).
-  단 `cameraId` 에 `_` 는 쓸 수 없다 — 제품 `stream_id` 가 `{cameraId}_{organization}` 이라
-  경계가 모호해진다(`-` 는 센서 id 구분자라 역시 금지).
+  교체하지 않으면 기본값 `1` 이 현장 카메라와 안 맞아 그 스트림은 센서 0개가 된다
+  (= 체류 알람이 아예 안 나감).
+  **반드시 선행 0 없는 숫자여야 한다** — 제품의 `AddStreamModel.cameraId` 는 `int` 다.
+  병원이 `ward-a` 처럼 비숫자 id 를 쓰거나 `01`/`1` 을 구분해야 한다면 도구가 아니라
+  제품 DTO 를 먼저 바꿔야 하고(외부 계약 변경 — 백엔드 소비자 확인 필요), 그 전에는
+  현장에서 **숫자 cameraId 를 배정받아야** 한다.
 
 ---
 

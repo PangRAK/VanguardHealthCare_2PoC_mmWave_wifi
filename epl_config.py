@@ -57,12 +57,16 @@ provision_wifi.py 가 Wi-Fi 연결 성공 후 여기에 센서를 등록하고,
     의존하지 않으며, **명시된 id 는 절대 재번호화하지 않는다**. 비숫자('north')·비연속·
     역순 sensorId 도 정상 동작한다 — 순번은 사람이 읽기 쉬우라는 관례일 뿐이다.
 
-  ★ cameraId 파트는 현장 설치 시 **병원이 부여한 실제 cameraId** 로 교체해야 한다.
-    숫자가 아니어도 된다 — 제품의 AddStreamModel.cameraId 는 **문자열**이고, 백엔드가
-    JSON 숫자로 보내도 DTO 경계에서 문자열로 승격된다(DTO/stream_params.coerce_camera_id).
-    다만 **cameraId 에 '_' 는 쓸 수 없다**: 제품 stream_id 규약이
-    '{cameraId}_{organization}' 이라 'ward_a'+'pia' 가 'ward'+'a_pia' 로 갈려 카메라와
-    조직이 동시에 틀린다(source.resolve_camera_id 가 등록을 거절한다).
+  ★ cameraId 파트는 현장 설치 시 **병원이 부여한 실제 cameraId** 로 교체해야 하고,
+    **선행 0 없는 숫자**여야 한다 — 제품의 AddStreamModel.cameraId 는 **int** 다
+    (전 모듈 공용 DTO. DTO/stream_params.py). 비숫자('ward-a')는 등록 요청이 422 로
+    거절되고, 선행 0('01')·밑줄('6_0')은 pydantic 이 조용히 1·60 으로 접어 그 센서가
+    어느 카메라에도 붙지 않는다. 이 제약은 assert_camera_id_registerable() 이 id 를
+    만드는 시점(make_sensor_id)과 파일을 읽는 시점(assert_sensor_id_format) 양쪽에서
+    강제하므로, 규격 위반 cameraId 는 기록되지도 읽히지도 않는다.
+    ※ '_' 금지는 위 int 제약에 흡수됐다(숫자에는 '_' 가 없다). 원래 이유는 제품 stream_id
+      규약이 '{cameraId}_{organization}' 이라 'ward_a'+'pia' 가 'ward'+'a_pia' 로 갈리기
+      때문이고, 그 가드는 제품 쪽 source.resolve_camera_id 에 그대로 남아 있다.
 
 [구버전 스키마 (단일 host)]
     {"host": "...", "url": "...", "node_name": "...", "ssid": "...",
@@ -84,9 +88,9 @@ DEFAULT_PALETTE = ["#27e0c8", "#ffb454", "#ff5d8f", "#6ea8ff", "#b18cff", "#7ce3
 
 # 도구 3종(run_provision / run_auto_positioning{,_v2})이 공유하는 카메라(stream) 기본값.
 # 카메라를 나누지 않는 현장은 이 한 카메라에 전 센서가 들어간다.
-# ★ 현장 설치 시 병원이 부여한 **실제 cameraId** 로 교체해야 한다. 숫자일 필요는 없다 —
-#   제품의 AddStreamModel.cameraId 는 문자열이라 'ward-a' 같은 값도 등록된다(단 '-' 는
-#   id 구분자, '_' 는 stream_id 구분자라 cameraId 파트에 쓸 수 없다).
+# ★ 현장 설치 시 병원이 부여한 **실제 cameraId** 로 교체해야 한다. **선행 0 없는 숫자**여야
+#   한다 — 제품의 AddStreamModel.cameraId 가 int 라서 'ward-a' 는 등록이 거절되고 '01' 은
+#   조용히 1 로 접힌다(assert_camera_id_registerable 이 강제한다).
 #   기본값이 '1' 인 것은 신규 설정의 관례가 cameraId '1' / sensorId '1','2','3' 이기 때문이고,
 #   그래도 **현장 값으로 바꾸지 않으면 그 스트림에는 센서가 0개**다(id 접두가 안 맞는다).
 DEFAULT_CAMERA_ID = "1"
@@ -223,7 +227,45 @@ _ID_FORMAT_HINT = (
     "센서 id 는 '{organization}-{cameraId}-{sensorId}' 형식이어야 합니다"
     " (예: 'pia-1-1'). organization/cameraId 파트에는 '-' 를 쓸 수 없고,"
     " sensorId 파트에는 쓸 수 있습니다(예: 'pia-1-10-201-31-120')."
+    " cameraId 파트는 **선행 0 없는 숫자**여야 합니다(제품 AddStreamModel.cameraId 가 int)."
 )
+
+
+def assert_camera_id_registerable(camera_id: Union[str, int], source: str = "") -> str:
+    """cameraId 파트가 제품에 **등록 가능한** 값인지 검증한다 — int 왕복 여부.
+
+    제품의 `AddStreamModel.cameraId` 는 **int** 다(전 모듈 공용 DTO). 센서 id 규격 자체는
+    세 파트를 불투명 문자열로 다루지만, cameraId 파트에 int 로 왕복하지 않는 값을 쓰면
+    **대조될 스트림이 존재할 수 없다** → 그 센서는 영원히 어느 카메라에도 붙지 않고,
+    운영자에게는 'NO SENSOR' 로만 보인다. 그래서 id 를 만드는·읽는 시점에 막는다.
+
+    거절되는 값과 이유(제품 DTO 에서 실측):
+      · 비숫자('ward-a', 'alpha') → pydantic 이 등록 요청을 422 로 거절한다.
+      · 선행 0('01')            → pydantic 이 조용히 1 로 접는다. **거절보다 위험하다** —
+                                  등록은 성공하고 'pia-01-*' 센서만 매칭 0개가 된다.
+      · 밑줄('6_0')             → Python int() 가 밑줄을 허용해 60 이 된다(같은 함정).
+    '0' 은 허용한다(int 왕복이 성립한다).
+
+    Args:
+        camera_id (Union[str, int]): 검사할 cameraId 파트.
+        source (str): 오류 메시지에 표시할 출처(파일명·CLI 인자명 등).
+
+    Returns:
+        str: strip() 된 cameraId 문자열(그대로 id 조립에 쓸 수 있다).
+
+    Raises:
+        ValueError: int 로 왕복하지 않는 값일 때.
+    """
+    cam = str(camera_id if camera_id is not None else "").strip()
+    if cam.isascii() and cam.isdigit() and str(int(cam)) == cam:
+        return cam
+    where = f" ({source})" if source else ""
+    raise ValueError(
+        f"cameraId 파트를 제품에 등록할 수 없습니다{where}: '{cam}'. "
+        "제품의 AddStreamModel.cameraId 는 int 라서 비숫자('ward-a')는 등록 요청이 거절되고, "
+        "선행 0('01')·밑줄('6_0')은 조용히 다른 숫자로 접혀 그 센서가 어느 카메라에도 "
+        "붙지 않습니다(영원히 'NO SENSOR'). 선행 0 없는 숫자로 바꾸세요(예: '1', '42')."
+    )
 
 
 def parse_sensor_id(sid: str) -> Tuple[str, str, str]:
@@ -260,7 +302,8 @@ def make_sensor_id(
         str: 규격 id 문자열.
 
     Raises:
-        ValueError: 어떤 파트가 비었거나, organization/cameraId 에 '-' 또는 '__' 가 있을 때."""
+        ValueError: 어떤 파트가 비었거나, organization/cameraId 에 '-' 또는 '__' 가 있을 때,
+            또는 cameraId 가 제품에 등록 불가한 값일 때(assert_camera_id_registerable)."""
     org = str(organization if organization is not None else "").strip()
     cam = str(camera_id if camera_id is not None else "").strip()
     sen = str(sensor_id if sensor_id is not None else "").strip()
@@ -277,6 +320,10 @@ def make_sensor_id(
     for label, part in (("organization", org), ("cameraId", cam), ("sensorId", sen)):
         if _FORBIDDEN_IN_ID in part:
             raise ValueError(f"{label} 에 '{_FORBIDDEN_IN_ID}' 를 쓸 수 없습니다: '{part}'.")
+    # ★ 쓰기 경로의 단일 관문이다. 이 함수를 타는 모든 id 생성(프로비저닝의
+    #   set_sensor_camera / assign_camera_sensor_ids / 순번 자동 배정)이 여기서 걸러진다 →
+    #   제품이 등록할 수 없는 cameraId 로는 애초에 파일에 기록되지 않는다.
+    assert_camera_id_registerable(cam)
     return SENSOR_ID_SEPARATOR.join((org, cam, sen))
 
 
@@ -299,7 +346,10 @@ def assert_sensor_id_format(sensors: List[Dict[str, Any]], source: str = "") -> 
     bad: List[str] = []
     for s in sensors:
         try:
-            parse_sensor_id(s.get("id", ""))
+            # 형식(3-파트)뿐 아니라 cameraId 파트의 **등록 가능성**까지 본다 — 손으로 적은
+            # 'pia-01-1' 은 형식은 통과하지만 제품이 그 카메라를 등록할 수 없어 영원히
+            # 매칭 0개다. 조용한 'NO SENSOR' 보다 파일을 읽는 시점의 실패가 낫다.
+            assert_camera_id_registerable(parse_sensor_id(s.get("id", ""))[1])
         except ValueError:
             bad.append(str(s.get("id") or "(빈 id)"))
     if bad:
@@ -937,10 +987,12 @@ def set_sensor_camera(
 
 
 def nonconforming_sensor_ids(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
-    """id 형식이 규격에 맞지 않는 센서 id 목록.
+    """id 형식이 규격에 맞지 않거나 cameraId 파트를 제품에 등록할 수 없는 센서 id 목록.
 
     규격을 벗어난 센서는 어느 카메라에도 붙지 않는다(제품이 등록을 거절한다). 도구가
-    프로비저닝 직후 경고로 알리기 위한 헬퍼다.
+    프로비저닝 직후 경고로 알리기 위한 헬퍼다. 3-파트 형식은 맞지만 cameraId 파트가
+    'ward-a'/'01' 처럼 제품 DTO(int)로 왕복하지 않는 것도 여기 잡힌다 — 형식만 보면
+    정상으로 보이는데 매칭은 영원히 0개인 가장 찾기 어려운 사고다.
     ※ get_sensors() 는 규격 위반을 ValueError 로 던지므로 여기서는 파일을 직접 읽는다.
 
     Returns:
@@ -957,7 +1009,7 @@ def nonconforming_sensor_ids(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
             out.append(f"(id 없음: {raw.get('host') or raw.get('node_name') or '?'})")
             continue
         try:
-            parse_sensor_id(sid)
+            assert_camera_id_registerable(parse_sensor_id(sid)[1])
         except ValueError:
             out.append(sid)
     return out

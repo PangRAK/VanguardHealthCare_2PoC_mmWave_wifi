@@ -101,12 +101,17 @@
   `raw[].sid` / `dets[].sid`)의 센서 식별자다 → **이전 녹화와 대조가 끊긴다.**
   `provision_wifi.py` 가 바뀐 id 를 출력으로 경고한다.
 - ★ **현장 설치 시 `cameraId` 파트를 병원이 부여한 실제 cameraId 로 교체해야 한다.**
-  숫자일 필요는 없다 — 제품의 `AddStreamModel.cameraId` 는 **문자열**이고, 백엔드가 JSON
-  숫자로 보내도 DTO 경계(`coerce_camera_id`)에서 문자열로 승격된다. 교체하지 않으면 기본값
-  `1` 이 현장 카메라와 안 맞아 그 스트림은 센서 0개가 된다(= 체류 알람이 아예 안 나감).
-  · **`cameraId` 에 `_` 금지** — 제품 `stream_id` 가 `{cameraId}_{organization}` 이고 폴백이
-    첫 `_` 1회 분해라 `ward_a`+`pia` 가 `ward`+`a_pia` 로 갈린다(카메라·테넌트가 동시에
-    틀리며 예외도 로그도 없다). `-` 도 센서 id 구분자라 금지. `organization` 쪽 `_` 는 허용.
+  교체하지 않으면 기본값 `1` 이 현장 카메라와 안 맞아 그 스트림은 센서 0개가 된다
+  (= 체류 알람이 아예 안 나감).
+  · ★ **선행 0 없는 숫자여야 한다** — 제품의 `AddStreamModel.cameraId` 는 `int` 다
+    (2026-08-04 되돌림. 변경 로그 참조). 비숫자(`ward-a`)는 등록 요청이 422 로 거절되고,
+    `01`·`6_0` 은 pydantic 이 조용히 `1`·`60` 으로 접어 그 센서가 어느 카메라에도 붙지
+    않는다(형식은 맞는데 매칭 0개 — 가장 찾기 어려운 사고다).
+    `assert_camera_id_registerable()` 이 id 생성(`make_sensor_id`)·설정 읽기
+    (`assert_sensor_id_format`)·CLI 인자(`--camera-id`) 세 지점에서 강제한다.
+  · `-`/`_` 금지는 위 숫자 제약에 흡수됐다(숫자에는 둘 다 없다). 원래 이유: `-` 는 센서 id
+    구분자, `_` 는 제품 `stream_id`(`{cameraId}_{organization}`) 구분자라 `ward_a`+`pia` 가
+    `ward`+`a_pia` 로 갈린다. `organization` 쪽 `_` 는 계속 허용.
 - **`sensorId` 는 생략하면 자동 배정된다** — 그 카메라에서 아직 안 쓰인 최소 순번을 기기
   유래 `spec_key`(node_name/host) 정렬로 **결정적으로** 준다(배열 순서 무관, 전역 카운터
   없음). **명시한 id 는 절대 재번호화하지 않는다.** 대조는 `normalize_id_value`
@@ -208,13 +213,18 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
           **skip 분기는 그대로 남긴다** — 없앨 게 아니라 안 걸리는 게 정상이다. 누군가
           옛 리비전을 가리키거나 다음 스키마 변경이 오면 다시 그 사실을 알려야 한다.
           (로컬 자산이 옛 것이면 skip 이 아니라 **fail** 이다 — 방침 무변경.)
-  - [x] ~~제품의 `AddStreamModel.cameraId` 가 `int` 라 비숫자 cameraId 가 매칭되지 않던
-        문제~~ → **해소됨(2026-08-02)**: `cameraId` 는 문자열이고 백엔드가 JSON 숫자로
-        보내도 DTO 경계(`coerce_camera_id`)에서 승격된다. 이제 `ward-a` 같은 값도 등록된다.
+  - [ ] **제품의 `AddStreamModel.cameraId` 가 `int` 라 비숫자·선행 0 cameraId 를 쓸 수 없다**
+        (2026-08-02 에 `str` 로 바꿨다가 **2026-08-04 되돌렸다** — 전 모듈 공용 DTO 라
+        신규 모듈 PR 이 짊어질 범위가 아니라는 리뷰 판단. 변경 로그 참조).
+        · 지금 도구는 이 제약을 **강제**한다(`assert_camera_id_registerable`) — 규격 위반
+          cameraId 로는 프로비저닝도 캘리브레이션도 되지 않으므로 조용히 틀리지는 않는다.
+        · 병원이 `ward-a` 같은 비숫자 id 를 쓰거나 `01`/`1` 을 구분해야 하면 **제품 DTO 를
+          먼저 바꿔야 한다** — 외부 계약 변경(MQ 봉투 `cameraId` 의 JSON 타입이 숫자→문자열)
+          이라 백엔드 소비자 확인이 선행 조건이다. 도구만 고쳐서는 해결되지 않는다.
   - [ ] **현장 설치 시 `cameraId` 파트를 병원이 부여한 실제 cameraId 로 교체**(값 자체는
         여전히 현장 값이어야 한다 — 기본값 `1` 은 그 병원 카메라가 아니다).
-        `./run_provision.sh` 의 `CAMERA_ID` 또는 `--camera-id <id>`. 숫자 제약은 없고,
-        `_` 와 `-` 만 쓸 수 없다.
+        `./run_provision.sh` 의 `CAMERA_ID` 또는 `--camera-id <id>`.
+        **선행 0 없는 숫자**여야 한다(위 항목).
   - [ ] **백엔드가 `cameraId`/`organization` 을 정확히 내려주는지 확인** — 이제 이 둘이
         카메라 식별의 **단일 출처**다(`cameraUrl`/`room`/`roomId` 는 읽지 않는다).
         없으면 `stream_id`(`{cameraId}_{organization}`) 분해로 폴백한다.
@@ -280,6 +290,40 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
 
 ## [변경 로그]
 
+- **2026-08-04 (제품이 `cameraId: int` 로 되돌아감 → 도구가 그 제약을 강제한다)**
+  - **왜**: 제품 PR #549 리뷰에서 "2stage 등 다른 모듈이 왜 바뀌었나" 지적이 나왔다.
+    `AddStreamModel` 은 전 모듈 공용 DTO 라 `cameraId` 타입 하나를 바꾸면 문서·2stage
+    소비자·타 모듈 테스트까지 끌려온다(당시 15개 파일). 신규 모듈 PR 이 짊어질 범위가
+    아니라고 판단해 **`cameraId: int` 를 복구**하고 mmwave 밖 변경을 전부 되돌렸다
+    (제품 커밋 `df2d1bd9`. 이제 그 PR 은 mmwave 밖에서 등록 8줄만 추가하고 삭제 0 이다).
+    문자열 식별자가 실제로 필요해지면 백엔드 소비자 확인을 포함한 별도 PR 로 논의한다.
+  - **이 레포에는 바꿀 `cameraId` 필드가 없다.** pydantic DTO 가 없고, `camera_id` 는
+    (a) CLI 인자와 (b) `epl_config.json` 센서 id 문자열의 한 조각이다. 내부 처리를 `int`
+    로 바꾸는 건 오히려 회귀다 — 세 파트 비교가 `normalize_id_value`(`strip().lower()`)
+    문자열 기준이고 `sensorId` 파트에는 `-`/비숫자가 정상 허용된다. 그래서 타입이 아니라
+    **제품의 int 제약을 강제**하는 방향으로 맞췄다.
+  - **`assert_camera_id_registerable()` 신규**(`epl_config.py`): cameraId 파트가 int 로
+    왕복하는지(`str(int(x)) == x`) 검증한다. 세 지점에서 강제한다 —
+    · `make_sensor_id()` = **쓰기 단일 관문** (프로비저닝의 `set_sensor_camera` /
+      `assign_camera_sensor_ids` / 순번 자동 배정이 전부 이걸 탄다) → 제품이 등록할 수
+      없는 cameraId 는 애초에 파일에 기록되지 않는다.
+    · `assert_sensor_id_format()` = **읽기 관문**(`get_sensors()` 경유) → 손으로 적어둔
+      `pia-01-1` 이 파일을 읽는 시점에 실패한다.
+    · CLI `--camera-id`(`provision_wifi` / `auto_positioning` / `auto_positioning_multi`)
+      → 프로비저닝은 **장치를 Wi-Fi 에 붙이기 전에** 막는다(붙인 뒤 알면 늦다).
+    `nonconforming_sensor_ids()` 도 같은 기준으로 바뀌어 진단 3종이 함께 알린다.
+  - **거절되는 값과 이유**(제품 DTO 에서 실측):
+    · 비숫자 `'ward-a'` → pydantic 이 등록 요청을 422 로 거절.
+    · 선행 0 `'01'` → 조용히 `1` 로 접힌다. **거절보다 위험하다** — 등록은 성공하고
+      `pia-01-*` 센서만 매칭 0개가 된다.
+    · 밑줄 `'6_0'` → Python `int()` 가 밑줄을 허용해 `60` (같은 함정).
+    · `True` → `1` 로 통과(카메라 1). `'0'` 은 정상 허용(int 왕복 성립).
+  - **현재 `epl_config.json` 은 영향 없다** — `pia-1-1/2/3` 으로 cameraId 파트가 `1` 이라
+    새 검증을 그대로 통과한다(실제로 확인).
+  - **현장 영향**: 병원이 부여하는 cameraId 를 **숫자로 배정받아야 한다.** `ward-a` 같은
+    비숫자나 `01` 을 써야 하는 상황이면 도구가 아니라 제품 DTO 를 먼저 바꿔야 한다
+    (외부 계약 변경 — MQ 봉투 `cameraId` 의 JSON 타입이 숫자→문자열).
+
 - **2026-08-02 (순번 sensorId 자동 배정 · `cameraId` 문자열화 · 정규화 단일 기준)**
   - **왜**: 2026-07-31 전환은 id 규격을 세웠지만 **id 를 누가 정하는가**는 남겨뒀다. 그
     결과 (a) id 를 생략하면 host 유래 값(`98bd80` / `10-201-31-120`)이 sensorId 파트가 돼
@@ -308,7 +352,9 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
     그 카메라의 미사용 최소 순번으로 옮긴다(`98bd80` → `pia-1-3`). 옛 동작(`pia-1-98bd80`)은
     형식만 맞고 순번 체계 밖이라 폐기했다. id 를 생략한 항목 역조회는 `spec_key` 대조로
     바꿨다(`normalize_sensor` 가 자동 id 를 만들어주던 옛 폴백이 죽었으므로).
-  - **`cameraId` 는 문자열**(제품 `DTO/stream_params.py`): 세 모델(`AddStreamModel` /
+  - **`cameraId` 는 문자열**(제품 `DTO/stream_params.py`) — ⚠ **2026-08-04 되돌림. 아래
+    최신 항목을 보라.** 이 절의 내용은 당시 기록으로만 남긴다(제품은 다시 `int` 다):
+    세 모델(`AddStreamModel` /
     `DeleteStreamModel` / `RTSPErrorModel`)의 선언을 `str` 로 바꾸고, 백엔드가 아직 JSON
     숫자로 보내는 값은 **DTO 경계 한 곳**(`coerce_camera_id`)에서만 승격한다(소비 모듈에서
     `str()` 로 봉합하지 않는다). `strip` 만 하고 `"06"→6` 같은 숫자 해석은 하지 않으며

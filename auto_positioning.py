@@ -795,7 +795,13 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
-    from epl_config import CONFIG_PATH, get_camera_ids, get_sensors_for_camera, load_config
+    from epl_config import (
+        CONFIG_PATH,
+        assert_camera_id_registerable,
+        get_camera_ids,
+        get_sensors_for_camera,
+        load_config,
+    )
     from mmwave_reader import SensorHub
     from mmwave_wifi_reader import build_sources
 
@@ -811,6 +817,13 @@ def main() -> int:
             print(f"ℹ️  --host 를 직접 줬으므로 --camera-id '{camera_id}' 필터는 무시합니다.")
         camera_id = ""
     elif camera_id:
+        # 제품이 등록할 수 없는 cameraId 로 캘리브레이션하면 존재할 수 없는 카메라의 방
+        # 좌표를 맞추는 셈이다 — '센서 0개' 로 흘리지 않고 이유를 먼저 알린다.
+        try:
+            assert_camera_id_registerable(camera_id, source="--camera-id")
+        except ValueError as e:
+            print(f"❌ {e}")
+            return 2
         cfg = load_config()
         try:
             specs = get_sensors_for_camera(cfg, organization, camera_id)

@@ -29,7 +29,7 @@ from improv_serial import ImprovSerial, ImprovError
 from epl_config import (
     load_config, save_config, upsert_sensor, set_sensor_camera, nonconforming_sensor_ids,
     get_sensors_for_camera, assign_camera_sensor_ids, short_id, CONFIG_PATH,
-    DEFAULT_CAMERA_ID, DEFAULT_ORGANIZATION,
+    DEFAULT_CAMERA_ID, DEFAULT_ORGANIZATION, assert_camera_id_registerable,
 )
 from mmwave_reader import autodetect_port
 
@@ -61,15 +61,26 @@ def main() -> int:
     ap.add_argument("--camera-id", default=DEFAULT_CAMERA_ID,
                     help=f"이 센서를 귀속시킬 카메라(stream) 식별자 (기본 {DEFAULT_CAMERA_ID}). "
                          "빈 문자열이면 센서 id 를 건드리지 않는다. "
-                         "★ 현장에서는 병원이 부여한 실제 cameraId 로 주세요 — 숫자가 아니어도 "
-                         "됩니다(제품의 AddStreamModel.cameraId 는 문자열입니다). "
-                         "단 '_' 와 '-' 는 쓸 수 없습니다.")
+                         "★ 현장에서는 병원이 부여한 실제 cameraId 로 주세요. "
+                         "**선행 0 없는 숫자**여야 합니다(제품의 AddStreamModel.cameraId 가 "
+                         "int 입니다) — 'ward-a' 는 제품이 등록을 거절하고, '01' 은 조용히 "
+                         "1 로 접혀 이 센서가 어느 카메라에도 붙지 않습니다.")
     ap.add_argument("--organization", default=DEFAULT_ORGANIZATION,
                     help=f"센서 id 의 organization 파트 (기본 {DEFAULT_ORGANIZATION})")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
     camera_id = str(args.camera_id or "").strip()
     organization = str(args.organization or "").strip() or DEFAULT_ORGANIZATION
+
+    # ★ 센서를 프로비저닝하고 파일에 쓴 **뒤에** 알면 늦다 — 장치는 이미 Wi-Fi 에 붙었는데
+    #   그 센서 id 는 제품이 대조할 수 없는 상태다. 인자 파싱 직후에 막는다.
+    #   (빈 문자열은 '센서 id 를 건드리지 않는다' 는 뜻이라 검사 대상이 아니다.)
+    if camera_id:
+        try:
+            assert_camera_id_registerable(camera_id, source="--camera-id")
+        except ValueError as exc:
+            print(f"❌ {exc}")
+            return 2
 
     port = _pick_port(args.port)
     if not port:
