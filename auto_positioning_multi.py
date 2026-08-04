@@ -34,6 +34,8 @@ run_auto_positioning.sh(라이브 1회 측정) 와 목적은 같다: 각 센서�
     python auto_positioning_multi.py --gt-logs a.jsonl b.jsonl c.jsonl
     python auto_positioning_multi.py --logs-dir ... --dry-run
     python auto_positioning_multi.py --ref 98bd80
+    python auto_positioning_multi.py --fix-roll         # Roll=0° 고정, 나머지만 최적화(스크립트 기본)
+    python auto_positioning_multi.py --free-roll        # 위 고정을 풀고 Roll 도 추정
     python auto_positioning_multi.py --camera-id 7     # 그 카메라 센서만 캘리브레이션(기본 1)
     python auto_positioning_multi.py --selftest        # 합성 다중로그로 검증(하드웨어/파일 불필요)
 
@@ -315,6 +317,19 @@ def selftest():
           f"≤ 개별 평균 {e_mean:.0f}mm  (개별={[round(x) for x in e_singles]})")
     ok_all &= p3
 
+    # (4) Roll 0° 고정(--fix-roll) 이 풀링 경로에서도 동작하는가 — 값은 정확히 0,
+    #     GT(전부 roll=0)를 노이즈 큰 로그로도 복원, 정확도는 자유 해보다 나빠지지 않아야 한다.
+    #     (기울어짐이 없는 설치에서는 관측 약한 roll 을 빼는 편이 항상 유리하다는 전제 확인)
+    res_fix = estimate_positions(fp, idp, min_overlap=20, ref_id="s1", fix_roll=True)
+    e_fix = _pos_err(res_fix)
+    zero_ok = all(p["roll_deg"] == 0.0 and p.get("roll_conf") == "fixed"
+                  for p in res_fix["placements"].values() if p.get("anchored"))
+    p4 = zero_ok and res_fix.get("roll_fixed") is True and e_fix <= e_pool + 60.0
+    print(f"  [{'PASS' if p4 else 'FAIL'}] roll 0° 고정: 위치오차 {e_fix:.0f}mm "
+          f"(자유 해 {e_pool:.0f}mm) · roll 전부 0.0°={zero_ok} · "
+          f"rms {res_fix.get('global_rms_free', 0):.0f}→{res_fix['global_rms']:.0f}mm")
+    ok_all &= p4
+
     # 정리
     for f in paths + npaths:
         try:
@@ -350,6 +365,10 @@ def main() -> int:
     ap.add_argument("--min-overlap", type=int, default=20, help="센서쌍 최소 동시관측 표본")
     ap.add_argument("--inlier-mm", type=float, default=300.0, help="RANSAC 인라이어 임계(mm)")
     ap.add_argument("--ref", default=None, help="기준센서 id(수평 설치로 아는 센서). 미지정 시 자동선택.")
+    ap.add_argument("--fix-roll", action="store_true",
+                    help="Roll 을 0° 로 고정(제약)하고 x·y·Yaw·Pitch 만 최적화 (스크립트 기본값)")
+    ap.add_argument("--free-roll", action="store_true",
+                    help="--fix-roll 취소(Roll 도 추정). CLI 가 뒤에 붙으므로 스크립트 기본값을 덮는다")
     ap.add_argument("--no-refine", action="store_true", help="번들조정 생략(쌍 affine 만)")
     ap.add_argument("--dry-run", action="store_true", help="계산만, epl_config.json 저장 안 함")
     ap.add_argument("--camera-id", default=DEFAULT_CAMERA_ID,
@@ -447,9 +466,11 @@ def main() -> int:
             print("     그 카메라 센서 전부가 함께 기록된 로그로 다시 돌리는 것을 권합니다.")
     print(f"  → 총 프레임(pool): {len(frames)}  ·  센서 {len(ids)}개")
 
+    fix_roll = args.fix_roll and not args.free_roll
+    print(f"  → Roll: {'0° 고정(x·y·Yaw·Pitch 만 최적화)' if fix_roll else '추정(자유)'}")
     result = estimate_positions(frames, ids, min_overlap=args.min_overlap,
                                 inlier_mm=args.inlier_mm, ref_id=args.ref,
-                                refine=not args.no_refine)
+                                refine=not args.no_refine, fix_roll=fix_roll)
     print_report(result, names)
     if result["warnings"]:
         print("\n  [경고]")

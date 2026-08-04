@@ -37,13 +37,33 @@ epl_config.json 에 기록한다.
               cosR≈1−R²/2 (2차항)이라 노이즈에 묻힘 → 신뢰도 라벨(ok/low/n/a)을 붙인다.
 - 절대각(방 기준)은 외부 기준이 필요 → 기본은 '기준센서 상대'로 보고한다.
 
+Roll 고정 모드 (--fix-roll)
+---------------------------
+실제 설치가 갸우뚱하지 않다고 아는 경우(대부분의 벽/천장 거치) roll 을 추정하지 말고
+**0° 로 고정한 채 x·y·Yaw·Pitch 만** 최적화한다. 이때 사후에 roll 값만 0 으로 덮어쓰면
+저장된 자세가 실제 적합된 affine 과 어긋나므로(전단이 남은 채 사라짐), 아래처럼
+**모형 자체를 제약**해 다시 푼다:
+
+    roll=0  ⇒  U=[[s,0],[0,cosP]]  ⇒  B(=local→room)=Rot(yaw)·diag(s, 1/cosP)
+
+즉 센서당 미지수가 6개(자유 affine)에서 4개(yaw, pitch, x, y)로 줄고 전단항이 사라진다.
+관측이 약한 roll 로 노이즈를 흡수하지 않으므로 Yaw/Pitch/위치가 더 안정적이다.
+대신 좌우 스케일 오차(=cosR 로 흡수되던 성분)를 흡수할 자유도가 없어 정합오차(RMS)는
+자유 해보다 커진다.
+★ 그 RMS 증가는 '정확도가 나빠졌다' 는 뜻이 아니다 — 자유도가 많은 쪽이 항상 RMS 가 낮다.
+  합성검증에서 고정 해는 RMS 가 96→98mm 로 커지는 동안 **GT 위치오차는 131→36mm 로 줄었다**.
+  그래서 리포트는 RMS 변화와 함께 '자유 해가 쓰던 roll 각도' 를 보여주고, 그 각도가 작으면
+  (=RMS 격차가 roll 탓이 아니면) --free-roll 로 되돌리지 말라고 명시한다.
+
 파이프라인: 수집(실측시각) → 시간정렬 보간 → 센서쌍 affine(RANSAC) → 최대성분/기준선택
-           → 전역 affine 번들조정(선형최소제곱) → RQ 분해 → 저장.
+           → 전역 affine 번들조정(선형최소제곱) → [--fix-roll 이면 roll≡0 제약 재최적화]
+           → RQ 분해 → 저장.
 
 사용법
     python auto_positioning.py
     python auto_positioning.py --seconds 90
     python auto_positioning.py --ref 98bd80         # 기준센서 지정(수평 설치로 아는 센서)
+    python auto_positioning.py --fix-roll           # Roll 을 0° 로 고정하고 나머지만 최적화
     python auto_positioning.py --dry-run
     python auto_positioning.py --selftest
 """
@@ -330,6 +350,230 @@ def refine_affine_ba(edges, frames, anchored, ref, inlier_mm=300.0,
     return out
 
 
+# ============================================================================
+# roll≡0 제약 번들조정 (가우스-뉴턴) — 전단(shear) 없는 affine 만 허용
+# ============================================================================
+#  g = 1/cosPitch (기준센서 대비 전방 확대율). pitch≥0 ⇒ g≥1 이므로 g 를 [1, G_MAX] 로 묶는다.
+#  ★ 왜 g≥1 을 강제하나: 저장은 pitch=acos(1/g) 로 하고 런타임(room_transform)은 그 pitch 로
+#    전방 스케일을 되돌린다. g<1(=기준센서보다 평평)을 허용하면 pitch 가 0° 로 clamp 되어
+#    '적합한 변환 ≠ 저장/적용되는 변환' 이 된다(x·y·Yaw 가 쓰이지 않을 스케일에 맞춰 틀어짐).
+#    경계에 걸리면 = 기준센서가 다른 센서보다 더 숙여져 있다는 뜻 → 경고로 --ref 재선택 안내.
+G_MIN, G_MAX = 1.0, 12.0        # g 범위(pitch 0°…85°). 비물리 해·GN 발산 방지 가드
+_GN_ITERS, _GN_LS = 80, 6       # 가우스-뉴턴 반복 / 라인서치 반감 횟수
+#  ↑ 활성집합이 걸리면(경계에 붙은 센서가 있으면) 수십 회가 필요하다 — 실측 로그에서 30회대.
+#    잔차·야코비가 numpy 벡터화라 한 회가 수 ms 수준이어서 넉넉히 잡아도 체감 비용이 없다.
+
+
+def B_roll0(yaw, g, s):
+    """roll≡0 제약 하의 local→room 2×2.  B = Rot(yaw)·diag(s, g),  g=1/cosPitch, s=±1(반전).
+    (A=room→local 은 이 행렬의 역: diag(s, 1/g)·Rot(−yaw) → 상삼각 U 의 전단항 u01=0)."""
+    c, sn = math.cos(yaw), math.sin(yaw)
+    return np.array([[c * s, -sn * g], [sn * s, c * g]])
+
+
+def refine_affine_ba_roll0(edges, frames, anchored, ref, init, *, inlier_mm=300.0,
+                           huber_mm=200.0):
+    """roll≡0 제약 하에서 {yaw, pitch(=acos 1/g), 위치 d} 를 가우스-뉴턴으로 최적화한다.
+
+    자유 affine 번들조정(refine_affine_ba, 센서당 6개)의 부분모형(센서당 4개: yaw,g,dx,dy).
+    잔차는 자유 해와 동일하게 'B_i·local_i + d_i = B_j·local_j + d_j'(기준센서 B=I, d=0 게이지).
+    · flip(s) 은 이산값이라 최적화하지 않고 init(자유 해)의 det 부호로 고정한다.
+    · init 을 초기값으로 IRLS(Huber) + 백트래킹 라인서치 → 비용이 줄 때만 갱신하므로 발산 없음.
+    · yaw 때문에 비선형이지만 초기값이 자유 해라 실질적으로 국소=전역 해에 붙는다.
+    · ★ g 의 상자제약([G_MIN,G_MAX])은 **활성집합(active set)** 으로 다룬다. 경계에 붙은 g 를
+      단순히 clamp 만 하면 그 성분이 섞인 스텝 전체가 상승방향이 되어 라인서치가 전부 실패하고
+      GN 이 최적점 훨씬 앞에서 멈춘다(실측: 위치 393mm·Yaw 5.4° 오차, RMS 603 vs 419mm).
+      그래서 경계에서 밖으로 밀리는 g 는 **야코비 열을 빼고 최소제곱을 다시 풀어** 나머지
+      자유도(yaw·위치)가 제 방향을 찾게 한다.
+    반환 형식은 refine_affine_ba 와 동일: {sid: {'B': 2×2(local→room), 'd': (2,)위치}}."""
+    nonref = [s for s in anchored if s != ref]
+    idx = {s: k for k, s in enumerate(nonref)}
+    NP = 4 * len(nonref)
+    cons = _corrs(edges, frames, anchored, inlier_mm=inlier_mm)
+    out = {ref: {"B": np.eye(2), "d": np.zeros(2)}}
+    if NP == 0 or not cons:
+        return out
+
+    # ---- 초기값: 자유 해의 affine 을 (yaw, g, flip) 으로 사영 --------------------
+    par, sgn = {}, {}
+    for s in nonref:
+        B0 = init.get(s, {}).get("B")
+        d0 = init.get(s, {}).get("d")
+        if B0 is None or d0 is None:
+            par[s] = [0.0, 1.0, 0.0, 0.0]; sgn[s] = 1.0
+            continue
+        det = float(np.linalg.det(B0))
+        sgn[s] = -1.0 if det < 0 else 1.0
+        A0 = np.linalg.inv(B0 if abs(det) > 1e-9 else B0 + np.eye(2) * 1e-6)
+        yaw0 = math.atan2(-float(A0[1, 0]), float(A0[1, 1]))
+        cP = _cosP_of(A0)
+        par[s] = [yaw0, _clamp(1.0 / cP if cP > 1e-6 else G_MAX, G_MIN, G_MAX),
+                  float(d0[0]), float(d0[1])]
+
+    # ---- 대응점을 배열로 미리 색인(잔차·야코비를 센서 단위 numpy 연산으로) ----------
+    N = len(cons)
+    Pi = np.array([c[1] for c in cons], float)
+    Pj = np.array([c[3] for c in cons], float)
+    rows = {}                       # sid → (i 쪽 행 인덱스, j 쪽 행 인덱스)
+    for s in anchored:
+        rows[s] = (np.array([n for n, c in enumerate(cons) if c[0] == s], dtype=int),
+                   np.array([n for n, c in enumerate(cons) if c[2] == s], dtype=int))
+
+    def residuals(pp):
+        """(N,2) 잔차 = (i 쪽 방좌표) − (j 쪽 방좌표)."""
+        R = np.zeros((N, 2))
+        for s in anchored:
+            ii, jj = rows[s]
+            if s == ref:                                  # 게이지: B=I, d=0
+                if ii.size:
+                    R[ii] += Pi[ii]
+                if jj.size:
+                    R[jj] -= Pj[jj]
+                continue
+            yaw, g, dx, dy = pp[s]
+            B = B_roll0(yaw, g, sgn[s]); d = np.array([dx, dy])
+            if ii.size:
+                R[ii] += Pi[ii] @ B.T + d
+            if jj.size:
+                R[jj] -= Pj[jj] @ B.T + d
+        return R
+
+    def hcost(R):
+        n = np.linalg.norm(R, axis=1)
+        big = n > huber_mm
+        return float((n[~big] ** 2).sum() + (huber_mm * (2.0 * n[big] - huber_mm)).sum())
+
+    def build(R):
+        """IRLS(Huber) 가중 야코비 M 과 우변 rhs. 자유 해의 refine_affine_ba 와 같은 가중방식."""
+        n = np.linalg.norm(R, axis=1)
+        sw = np.sqrt(np.where(n > huber_mm, huber_mm / np.maximum(n, 1e-6), 1.0))
+        M = np.zeros((2 * N, NP))
+        for s in nonref:
+            yaw, g = par[s][0], par[s][1]
+            c, sn = math.cos(yaw), math.sin(yaw)
+            base = 4 * idx[s]
+            for ind, sign, P in ((rows[s][0], 1.0, Pi), (rows[s][1], -1.0, Pj)):
+                if not ind.size:
+                    continue
+                px, py = P[ind, 0], P[ind, 1]
+                q0, q1 = sgn[s] * px, g * py              # q = diag(s,g)·local
+                f = sign * sw[ind]
+                # ∂(B·p)/∂yaw = Rot′(yaw)·q,  ∂(B·p)/∂g = Rot(yaw)·(0, ly),  ∂/∂d = I
+                M[2 * ind, base + 0] += (-sn * q0 - c * q1) * f
+                M[2 * ind + 1, base + 0] += (c * q0 - sn * q1) * f
+                M[2 * ind, base + 1] += (-sn * py) * f
+                M[2 * ind + 1, base + 1] += (c * py) * f
+                M[2 * ind, base + 2] += f
+                M[2 * ind + 1, base + 3] += f
+        rhs = np.empty(2 * N)
+        rhs[0::2] = -R[:, 0] * sw
+        rhs[1::2] = -R[:, 1] * sw
+        return M, rhs
+
+    def step_from(M, rhs, frozen):
+        """frozen(고정) 열을 뺀 축소 최소제곱 해를 전체 길이 벡터로 되돌린다."""
+        d = np.zeros(NP)
+        cols = np.where(~frozen)[0]
+        if not cols.size:
+            return d
+        sub, *_ = np.linalg.lstsq(M[:, cols], rhs, rcond=None)
+        d[cols] = sub
+        return d
+
+    for _ in range(_GN_ITERS):
+        R = residuals(par)
+        cost0 = hcost(R)
+        M, rhs = build(R)
+
+        # 활성집합: 경계에 붙어 있고 스텝이 '밖으로' 미는 g 는 열을 빼고 재해석한다.
+        frozen = np.zeros(NP, bool)
+        delta = step_from(M, rhs, frozen)
+        for _pass in range(len(nonref) + 1):
+            newly = False
+            for s in nonref:
+                k = 4 * idx[s] + 1
+                if frozen[k]:
+                    continue
+                g_now, dg = par[s][1], float(delta[k])
+                if (g_now <= G_MIN + 1e-9 and dg < 0) or (g_now >= G_MAX - 1e-9 and dg > 0):
+                    frozen[k] = True; newly = True
+            if not newly:
+                break
+            delta = step_from(M, rhs, frozen)
+        if not np.all(np.isfinite(delta)):
+            break
+
+        # 백트래킹 — 비용이 줄어드는 스텝만 채택(줄지 않으면 수렴/정체로 보고 종료)
+        taken, step = None, 0.0
+        st = 1.0
+        for _ls in range(_GN_LS):
+            trial = {}
+            for s in nonref:
+                b, k = par[s], 4 * idx[s]
+                trial[s] = [b[0] + st * float(delta[k]),
+                            _clamp(b[1] + st * float(delta[k + 1]), G_MIN, G_MAX),
+                            b[2] + st * float(delta[k + 2]),
+                            b[3] + st * float(delta[k + 3])]
+            if hcost(residuals(trial)) <= cost0:
+                taken, step = trial, st
+                break
+            st *= 0.5
+        if taken is None:
+            break
+        par = taken
+        if step * float(np.max(np.abs(delta))) < 1e-3:      # 최대 갱신폭 < 0.001(mm/rad) → 수렴
+            break
+
+    for s in nonref:
+        yaw, g, dx, dy = par[s]
+        out[s] = {"B": B_roll0(yaw, g, sgn[s]), "d": np.array([dx, dy]),
+                  "g_at_bound": bool(g <= G_MIN + 1e-6)}   # pitch 0° 가 '추정' 이 아니라 경계 산물
+    return out
+
+
+def scale_consistency(edges, anchored, ref):
+    """센서쌍 affine 의 |det| 은 **게이지와 무관한 상대 전방스케일** g_b/g_a 다
+    (roll≡0 모형에서 det(A_edge)=det(A_a)·det(B_b)=±g_b/g_a). 따라서 사이클을 돌면 곱이 1 이어야
+    한다. 크게 벗어나면 센서쌍 변환들이 서로 모순이라는 뜻 —  **어떤 --ref 를 골라도** 모든
+    센서의 상대 Pitch 를 ≥0 으로 만들 수 없고 Pitch 는 확정되지 않는다(궤적·표본 문제).
+
+    반환 (worst, detail): worst = 최악 불일치 배수(1.0=완전 일치), detail = 사람이 읽을 설명|None."""
+    adj = collections.defaultdict(list)
+    ratio = {}
+    for (a, b), e in edges.items():
+        if a not in anchored or b not in anchored:
+            continue
+        r = abs(float(np.linalg.det(e["A"])))
+        if not (1e-6 < r < 1e6):
+            continue
+        ratio[(a, b)] = r                      # = g_b / g_a
+        adj[a].append(b); adj[b].append(a)
+    # ref 에서 신장트리를 펴서 각 센서의 예측 로그스케일을 정한다
+    logs, order, seen = {ref: 0.0}, [ref], {ref}
+    tree = set()
+    while order:
+        u = order.pop()
+        for v in adj[u]:
+            if v in seen:
+                continue
+            r = ratio.get((u, v))
+            logs[v] = logs[u] + (math.log(r) if r else 0.0) if r else logs[u]
+            if r is None:                       # (v,u) 방향으로 기록된 간선
+                r2 = ratio.get((v, u))
+                logs[v] = logs[u] - math.log(r2) if r2 else logs[u]
+            seen.add(v); order.append(v); tree.add((u, v)); tree.add((v, u))
+    worst, detail = 1.0, None
+    for (a, b), r in ratio.items():
+        if (a, b) in tree or a not in logs or b not in logs:
+            continue                            # 트리 간선은 정의상 일치
+        pred = math.exp(logs[b] - logs[a])
+        m = max(r / pred, pred / r) if pred > 0 else float("inf")
+        if m > worst:
+            worst = m
+            detail = f"{a}·{b} 측정 {r:.2f} vs 다른 경로 예측 {pred:.2f}"
+    return worst, detail
+
+
 def _ba_rms(sol, edges, frames, anchored, ref, inlier_mm=300.0):
     cons = _corrs(edges, frames, anchored, inlier_mm=inlier_mm)
     if not cons:
@@ -347,7 +591,9 @@ def _ba_rms(sol, edges, frames, anchored, ref, inlier_mm=300.0):
 # 파이프라인
 # ============================================================================
 def estimate_positions(frames, ids, *, min_overlap=20, inlier_mm=300.0, min_area=8e4,
-                       ref_id=None, min_spread_mm=400.0, refine=True):
+                       ref_id=None, min_spread_mm=400.0, refine=True, fix_roll=False):
+    """fix_roll=True 면 roll 을 0° 로 '제약' 한 채 x·y·Yaw·Pitch 만 최적화한다
+    (사후 0 대입이 아니라 전단 없는 모형으로 재적합 → 저장값과 적합된 affine 이 일관)."""
     edges, diag = build_edges(frames, ids, min_overlap=min_overlap,
                               inlier_mm=inlier_mm, min_area=min_area)
     anchored, ref, comps = select_component_and_ref(edges, ids, ref_id=ref_id)
@@ -360,11 +606,66 @@ def estimate_positions(frames, ids, *, min_overlap=20, inlier_mm=300.0, min_area
         pairs = _pairs_report(diag, min_overlap)
         return {"placements": placements, "ref": None, "pairs": pairs,
                 "components": [sorted(c) for c in comps], "warnings": warnings,
-                "global_rms": 0.0}
+                "global_rms": 0.0, "global_rms_free": 0.0, "roll_fixed": bool(fix_roll)}
 
     sol = refine_affine_ba(edges, frames, anchored, ref, inlier_mm=inlier_mm) if refine \
         else {s: {"B": np.eye(2), "d": np.zeros(2)} for s in anchored}
     g_rms = _ba_rms(sol, edges, frames, anchored, ref, inlier_mm=inlier_mm)
+    rms_free = g_rms
+    # 자유 해 진단 두 가지를 여기서 미리 뽑는다(고정 모드는 아래에서 sol 을 덮어쓴다):
+    #  · flat_ratio: 전방압축비(기준센서=1). >1 이면 '기준센서보다 평평'(상대 pitch<0) → pitch 0° 처리.
+    #  · roll_free : 자유 해가 그 센서에 붙였던 roll(°). 고정 모드가 '무엇을 버리는지' 보여준다.
+    flat_ratio, roll_free = {}, {}
+    for sid in anchored:
+        Bf = sol[sid]["B"]
+        detf = float(np.linalg.det(Bf))
+        Af = np.linalg.inv(Bf if abs(detf) > 1e-9 else Bf + np.eye(2) * 1e-6)
+        flat_ratio[sid] = _cosP_of(Af)
+        _y, _p, _r, _f = decompose_Aloc(Af)
+        roll_free[sid] = math.degrees(_r)
+    # ★ 라벨·리포트는 '실제로 제약 최적화가 돌았는가' 로 판단한다 — fix_roll 만 보고 'roll 고정'
+    #   이라고 쓰면 --no-refine(번들조정 자체를 건너뜀) 에서 하지 않은 최적화를 했다고 말하게 되고,
+    #   기존의 roll 신뢰도 경고(low/n-a)까지 덮어 버린다.
+    roll_is_fixed = bool(fix_roll and refine)
+    g_bound = {}
+    if roll_is_fixed:
+        # 자유 해를 초기값으로 'roll≡0' 부분모형에서 재최적화 → 나머지(x,y,Yaw,Pitch)가
+        # 제약과 일관되게 다시 맞춰진다. (사후 roll=0 대입은 적합된 affine 과 어긋남)
+        sol = refine_affine_ba_roll0(edges, frames, anchored, ref, sol, inlier_mm=inlier_mm)
+        g_bound = {sid: bool(sol[sid].get("g_at_bound")) for sid in anchored}
+        g_rms = _ba_rms(sol, edges, frames, anchored, ref, inlier_mm=inlier_mm)
+        # ★ RMS 증가만으로 '실제로 기울어졌다' 고 판정하면 안 된다 — 표본이 적거나 노이즈가
+        #   크면 자유 해가 여분 자유도 2개로 '과적합' 해 RMS 만 낮게 만든다(자체검증: 위치오차는
+        #   131→84mm 로 좋아지는데 RMS 는 96→146mm 로 나빠짐). 그래서 RMS 변화와 함께
+        #   '자유 해가 쓰던 roll 각도' 를 같이 보여주고 판단 근거를 사람에게 넘긴다.
+        worst_sid = max(roll_free, key=lambda k: abs(roll_free[k])) if roll_free else None
+        worst_roll = abs(roll_free.get(worst_sid, 0.0)) if worst_sid else 0.0
+        if g_rms > max(1.25 * rms_free, rms_free + 15.0):
+            head = (f"Roll 0° 고정으로 전역 정합오차가 {rms_free:.0f}→{g_rms:.0f}mm 로 커졌습니다. "
+                    f"자유 해가 쓰던 Roll 은 최대 {worst_roll:.1f}° ({worst_sid}) 였습니다 → ")
+            if worst_roll < 5.0:
+                # ★ 자유 해의 roll 이 애초에 0 에 가까웠다 = 이 RMS 격차는 roll 때문이 아니다.
+                #   (자유 affine 의 좌우·전체 스케일 자유도가 흡수한 것) 이때 --free-roll 을
+                #   권하면 더 나쁜 해로 유도한다 — 합성검증 35/35 에서 고정 해가 GT 에 더 가까웠다.
+                warnings.append(head + "이 격차는 Roll 때문이 아닙니다(자유 affine 의 좌우·전체 "
+                                "스케일 자유도가 흡수한 것). --free-roll 로 되돌리지 말고, "
+                                "겹침 구역에서 곡선으로 더 크게 움직인 로그로 재측정하세요.")
+            elif worst_roll <= 15.0:
+                warnings.append(head + "실제 설치로 그럴듯한 각도이니 --free-roll 결과와 "
+                                "비교해 보세요(RMS 는 자유도가 많은 쪽이 항상 낮아 정확도의 "
+                                "척도가 아닙니다 — 두 해의 오버레이를 눈으로 비교하세요).")
+            else:
+                warnings.append(head + "그렇게 기울여 달지 않았다면 표본 부족·좌우 스케일 오차를 "
+                                "roll 이 흡수한 것이라 0° 고정이 맞습니다 "
+                                "(RMS 는 자유도가 많은 쪽이 항상 낮아 정확도의 척도가 아닙니다).")
+        elif worst_roll >= 25.0:
+            # RMS 가 별로 안 늘었는데 자유 해의 roll 이 거대했다 = 순수 노이즈 흡수였다는 증거.
+            warnings.append(f"참고: 자유 해는 {worst_sid} 에 Roll {roll_free[worst_sid]:.1f}° 를 "
+                            f"붙였는데 0° 로 고정해도 정합오차가 {rms_free:.0f}→{g_rms:.0f}mm 로 "
+                            "거의 그대로입니다 — 그 각도는 실제 기울어짐이 아니라 노이즈였습니다.")
+    elif fix_roll and not refine:
+        warnings.append("--no-refine 이면 번들조정을 건너뛰므로 Roll 고정 최적화도 생략됩니다"
+                        " (아래 Roll 값은 '고정' 이 아니라 항등해의 부산물입니다).")
 
     # 각 센서: A(room→local) = B⁻¹ → RQ 분해. pitch 는 '가장 평평한 센서=0°' 로 정규화.
     Aloc, cosP = {}, {}
@@ -398,12 +699,19 @@ def estimate_positions(frames, ids, *, min_overlap=20, inlier_mm=300.0, min_area
         s = -1.0 if u00 < 0 else 1.0
         cR = min(abs(u00), 1.0)
         sP = math.sin(pitch)
-        if sP > 5e-2:
+        if roll_is_fixed:
+            # 제약 모형이라 u01≈0(부동소수 오차만) → 값도 라벨도 '고정'으로 못 박는다.
+            roll, roll_conf = 0.0, "fixed"
+        elif sP > 5e-2:
             roll = math.atan2(_clamp((s * u01) / sP, -1.0, 1.0), cR)
             roll_conf = "ok" if pitch >= math.radians(15) else "low"
         else:
             roll = 0.0
             roll_conf = "n/a"                                    # pitch≈0 → roll 관측불가
+        # Pitch 신뢰도: 상대 pitch 가 음수로 나오려 한 센서(=기준센서보다 평평)는 0° 로 잡힌다.
+        # 고정 모드는 g 가 경계(G_MIN)에 붙었는지로 '직접' 안다 — 자유 해의 압축비로 판정하면
+        # 자유 해가 그 스케일을 roll 로 흘려버린 센서(예: 실측 pia-1-1)를 놓친다(무성 고정).
+        pitch_conf = "clamped" if (g_bound.get(sid) or flat_ratio.get(sid, 1.0) > 1.02) else "ok"
         pos = sol[sid]["d"]
         r = [e["rms"] for (a, b), e in edges.items() if sid in (a, b)]
         placements[sid] = {
@@ -412,10 +720,25 @@ def estimate_positions(frames, ids, *, min_overlap=20, inlier_mm=300.0, min_area
             "heading_deg": math.degrees(yaw),      # Yaw (좌우방향 설치각도)
             "pitch_deg": math.degrees(pitch),      # Pitch (상하방향 설치각도)
             "roll_deg": math.degrees(roll),        # Roll (기울어짐 각도)
-            "roll_conf": roll_conf, "flip": bool(flip),
+            "roll_conf": roll_conf, "pitch_conf": pitch_conf, "flip": bool(flip),
             "rms": (min(r) if r else None),
         }
 
+    # Pitch 가 경계에 걸린 센서 안내 — '--ref 를 바꾸면 된다' 는 조언은 **그 해가 존재할 때만**
+    # 유효하다. 센서쌍 전방스케일비가 서로 모순이면(사이클 곱 ≠ 1) 어떤 --ref 로도 못 고친다.
+    clamped = [sid for sid, p in placements.items()
+               if p.get("anchored") and p.get("pitch_conf") == "clamped"]
+    if clamped:
+        worst_c, detail = scale_consistency(edges, anchored, ref)
+        head = (f"센서 {', '.join(clamped)} 의 Pitch 0° 는 '추정값' 이 아니라 제약 경계입니다"
+                " (기준센서보다 평평 → 상대 Pitch 가 음수). ")
+        if worst_c > 1.3:
+            warnings.append(head + f"게다가 센서쌍 전방스케일비가 서로 모순입니다({detail}, "
+                            f"불일치 {worst_c:.2f}배) → **어떤 --ref 를 골라도** Pitch 는 확정되지 "
+                            "않습니다. Pitch 가 필요하면 겹침 구역에서 곡선으로 크게 움직인 로그로 "
+                            "재측정하세요(x·y·Yaw 는 그대로 쓸 수 있습니다).")
+        else:
+            warnings.append(head + "가장 평평한(수평) 센서를 --ref 로 지정하면 Pitch 가 살아납니다.")
     # 경고: 궤적이 일직선이면 자세 불안정
     for (a, b), e in edges.items():
         if e["minor"] < min_spread_mm:
@@ -427,7 +750,8 @@ def estimate_positions(frames, ids, *, min_overlap=20, inlier_mm=300.0, min_area
     return {"placements": placements, "ref": ref,
             "pairs": _pairs_report(diag, min_overlap),
             "components": [sorted(c) for c in comps], "warnings": warnings,
-            "global_rms": g_rms}
+            "global_rms": g_rms, "global_rms_free": rms_free,
+            "roll_fixed": roll_is_fixed}
 
 
 def _pairs_report(diag, min_overlap):
@@ -563,7 +887,8 @@ def apply_to_config(result, sensors_meta, *, path=None, dry_run=False):
     return info
 
 
-_CONF_LABEL = {"ok": "", "low": " (신뢰낮음)", "n/a": " (관측불가)"}
+_CONF_LABEL = {"ok": "", "low": " (신뢰낮음)", "n/a": " (관측불가)", "fixed": " (0°고정)"}
+_PITCH_LABEL = {"ok": "", "clamped": " (경계·추정아님)"}
 
 
 def print_report(result, names=None):
@@ -586,17 +911,25 @@ def print_report(result, names=None):
         print("     → 두 센서가 함께 보는 구역에서 한 사람이 '천천히 곡선으로' 충분히 움직이도록 재측정.")
         return
     print(f"\n  기준(원점) 센서: {nm(ref)}   전역 정합오차(RMS): {result['global_rms']:.0f} mm")
-    print("  · 위치·Yaw 는 기준센서 상대,  Pitch 는 가장 평평한 센서를 0°로 한 상대값,  Roll 은 기준센서 상대.")
+    if result.get("roll_fixed"):
+        print(f"  · Roll 은 0° 로 '고정'하고 x·y·Yaw·Pitch 만 최적화했습니다"
+              f" (참고: roll 까지 추정한 자유 해의 정합오차 {result.get('global_rms_free', 0.0):.0f} mm).")
+        print("    ※ RMS 는 '얼마나 잘 맞췄나'가 아니라 '자유도가 몇 개냐'에 더 좌우됩니다 —"
+              " 미지수를 뺀 고정 해가 RMS 는 커도 실제 배치는 더 정확할 수 있습니다.")
+        print("  · 위치·Yaw 는 기준센서 상대,  Pitch 는 기준센서를 0°로 한 상대값.")
+    else:
+        print("  · 위치·Yaw 는 기준센서 상대,  Pitch 는 가장 평평한 센서를 0°로 한 상대값,  Roll 은 기준센서 상대.")
     print("\n  [추정된 설치자세]")
     for sid, p in result["placements"].items():
         if p.get("anchored"):
             tag = " (기준)" if p.get("is_ref") else ""
             rms = f"  rms {p['rms']:.0f}mm" if p.get("rms") is not None else ""
             rc = _CONF_LABEL.get(p.get("roll_conf", "ok"), "")
+            pc = _PITCH_LABEL.get(p.get("pitch_conf", "ok"), "")
             fwd_sc = 1.0 / max(math.cos(math.radians(p["pitch_deg"])), 1e-3)   # 앞뒤 스케일
             lat_sc = 1.0 / max(math.cos(math.radians(p["roll_deg"])), 1e-3)    # 좌우 스케일
             print(f"    ✅ {nm(sid)}{tag}: 위치=({p['x']:.0f},{p['y']:.0f})mm  "
-                  f"Yaw(좌우)={p['heading_deg']:.1f}°  Pitch(상하)={p['pitch_deg']:.1f}°  "
+                  f"Yaw(좌우)={p['heading_deg']:.1f}°  Pitch(상하)={p['pitch_deg']:.1f}°{pc}  "
                   f"Roll(기울)={p['roll_deg']:.1f}°{rc}  반전={'예' if p['flip'] else '아니오'}{rms}")
             print(f"         └ 유도 스케일: 앞뒤 ×{fwd_sc:.3f} (=1/cosPitch)  "
                   f"좌우 ×{lat_sc:.3f} (=1/cosRoll)")
@@ -642,6 +975,25 @@ def selftest():
         if dy > 1e-4 or dp > 1e-4 or dr > 1e-4 or rf != f:
             rt_ok = False; print(f"      FAIL ({y},{p},{r},{f}) → dy={dy:.4f} dp={dp:.4f} dr={dr:.4f} flip={rf}")
     print("      " + ("PASS" if rt_ok else "FAIL")); ok_all &= rt_ok
+
+    # 0b) roll≡0 제약 파라미터화가 일반 모형의 roll=0 단면과 정확히 같은가
+    #     (B_roll0 = pose_to_Aloc(yaw,pitch,0,flip)⁻¹ 이어야 제약 최적화 결과를 그대로 RQ 분해 가능)
+    print("  [0b] roll≡0 파라미터화 ↔ 일반 모형 일치")
+    c_ok = True
+    for (y, p, f) in [(0, 0, False), (30, 20, False), (-40, 35, True), (170, 25, False), (95, 8, True)]:
+        yaw, pitch = math.radians(y), math.radians(p)
+        A = pose_to_Aloc(yaw, pitch, 0.0, f)
+        B = B_roll0(yaw, 1.0 / math.cos(pitch), -1.0 if f else 1.0)
+        if float(np.abs(A @ B - np.eye(2)).max()) > 1e-9:
+            c_ok = False; print(f"      FAIL ({y},{p},{f}): A·B ≠ I")
+        # 제약 해를 RQ 분해하면 roll 이 정확히 0, yaw/pitch 는 그대로 나와야 한다
+        ry, rp, rr, rf = decompose_Aloc(np.linalg.inv(B))
+        if abs(math.degrees(rr)) > 1e-6 or abs(math.degrees(rp) - p) > 1e-4 or rf != f \
+                or abs(((math.degrees(ry) - y) + 180) % 360 - 180) > 1e-4:
+            c_ok = False
+            print(f"      FAIL 분해 ({y},{p},{f}) → yaw={math.degrees(ry):.3f} "
+                  f"pitch={math.degrees(rp):.3f} roll={math.degrees(rr):.6f} flip={rf}")
+    print("      " + ("PASS" if c_ok else "FAIL")); ok_all &= c_ok
 
     def path_room(frac):
         return (2500 + 1800 * math.sin(2 * math.pi * frac * 1.5),
@@ -742,6 +1094,106 @@ def selftest():
                   for s in ("s2", "s3") if resH["placements"][s].get("anchored"))
     print(f"  [{'PASS' if lowflag else 'FAIL'}] H roll 신뢰도 라벨(low/n-a)"); ok_all &= lowflag
 
+    # ---- Roll 0° 고정 모드(--fix-roll) -------------------------------------------
+    def _worst_pos_err(res, gts):
+        e = 0.0
+        for sid, gt in gts.items():
+            p = res["placements"].get(sid, {})
+            if not p.get("anchored"):
+                return float("inf")
+            e = max(e, math.hypot(p["x"] - gt["x"], p["y"] - gt["y"]))
+        return e
+
+    # I: 실제로 기울어짐이 없는 설치(gF: pitch 있음, roll 0) → 고정해도 GT 복원, roll 은 정확히 0
+    frF = frames_of(gF)
+    resI = estimate_positions(frF, list(gF), min_overlap=15, ref_id="s1", fix_roll=True)
+    evaluate("I fix-roll (GT roll=0)", gF, resI)
+    zero_ok = all(p["roll_deg"] == 0.0 and p.get("roll_conf") == "fixed"
+                  for p in resI["placements"].values() if p.get("anchored"))
+    print(f"  [{'PASS' if zero_ok else 'FAIL'}] I roll 정확히 0.0° + 라벨 fixed"); ok_all &= zero_ok
+    # 제약이 맞는 상황이라 정합오차가 자유 해 대비 크게 나빠지지 않아야 한다(미지수만 줄어듦)
+    resI_free = estimate_positions(frF, list(gF), min_overlap=15, ref_id="s1")
+    rms_ok = resI["global_rms"] <= resI_free["global_rms"] * 1.25 + 5.0
+    acc_ok = _worst_pos_err(resI, gF) <= _worst_pos_err(resI_free, gF) + 60.0
+    print(f"  [{'PASS' if rms_ok and acc_ok else 'FAIL'}] I 제약 손실 없음: rms "
+          f"{resI_free['global_rms']:.0f}→{resI['global_rms']:.0f}mm · 위치오차 "
+          f"{_worst_pos_err(resI_free, gF):.0f}→{_worst_pos_err(resI, gF):.0f}mm")
+    ok_all &= (rms_ok and acc_ok)
+
+    # I-b: 저장되는 자세(x,y,Yaw,Pitch,roll=0,flip)로 재구성한 변환 == '적합된' 변환 인가.
+    #      런타임(room_transform)은 저장값만 쓰므로 이게 어긋나면 오버레이가 그만큼 틀어진다.
+    #      (그래서 g=1/cosPitch 를 ≥1 로 묶는다 — pitch clamp 로 스케일이 사라지지 않게)
+    edgesI, _dg = build_edges(frF, list(gF), min_overlap=15, inlier_mm=300.0)
+    anchI, refI, _cp = select_component_and_ref(edgesI, list(gF), ref_id="s1")
+    freeI = refine_affine_ba(edgesI, frF, anchI, refI, inlier_mm=300.0)
+    fixI = refine_affine_ba_roll0(edgesI, frF, anchI, refI, freeI, inlier_mm=300.0)
+    worst = 0.0
+    for _sid, so in fixI.items():
+        A = np.linalg.inv(so["B"])
+        yy, _pp, _rr, ff = decompose_Aloc(A)
+        p_saved = math.acos(_clamp(_cosP_of(A), 0.0, 1.0))
+        worst = max(worst, float(np.abs(pose_to_Aloc(yy, p_saved, 0.0, ff) - A).max()))
+    cons_ok = worst < 1e-9
+    print(f"  [{'PASS' if cons_ok else 'FAIL'}] I 저장값 = 적합값 일관성 (최대차 {worst:.1e})")
+    ok_all &= cons_ok
+
+    # I-c: '사후에 roll 만 0 으로 덮어쓰기' 보다 제약 재최적화가 실제로 더 잘 맞아야 한다
+    #      (덮어쓰기는 나머지 값이 옛 전단을 전제로 맞춰져 있어 변환이 어긋난다)
+    naive = {}
+    for sid, so in freeI.items():
+        A = np.linalg.inv(so["B"])
+        yy, pp, _rr, ff = decompose_Aloc(A)
+        naive[sid] = {"B": np.linalg.inv(pose_to_Aloc(yy, pp, 0.0, ff)), "d": so["d"]}
+    rms_naive = _ba_rms(naive, edgesI, frF, anchI, refI, inlier_mm=300.0)
+    rms_fix = _ba_rms(fixI, edgesI, frF, anchI, refI, inlier_mm=300.0)
+    better = rms_fix <= rms_naive
+    print(f"  [{'PASS' if better else 'FAIL'}] I 제약 재최적화 ≤ 사후 0 대입: "
+          f"{rms_fix:.0f}mm ≤ {rms_naive:.0f}mm")
+    ok_all &= better
+
+    # I-d: ★ g 가 경계(G_MIN)에 붙는 배치 — 기준센서가 '가장 많이 숙여진' 센서라 다른 센서의
+    #      상대 pitch 가 음수가 되는 경우. 여기서 예전 구현은 라인서치가 전부 실패해 GN 이
+    #      3회에서 멈추고 최적점에서 수백 mm 벗어난 해를 냈다(clamp 만 하면 스텝 전체가
+    #      상승방향이 되기 때문). 활성집합이 제대로 동작하는지 = '지역최적' 인지로 검증한다.
+    gK = {"s1": {"x": 0, "y": 0, "yaw": 0, "pitch": 30, "roll": 0},       # 기준이 제일 숙여짐
+          "s2": {"x": 5000, "y": 0, "yaw": 40, "pitch": 5},
+          "s3": {"x": 2500, "y": 5600, "yaw": 180, "pitch": 0}}
+    frK = frames_of(gK)
+    edgesK, _dk = build_edges(frK, list(gK), min_overlap=15, inlier_mm=300.0)
+    anchK, refK, _ck = select_component_and_ref(edgesK, list(gK), ref_id="s1")
+    freeK = refine_affine_ba(edgesK, frK, anchK, refK, inlier_mm=300.0)
+    fixK = refine_affine_ba_roll0(edgesK, frK, anchK, refK, freeK, inlier_mm=300.0)
+    at_bound = [s for s in anchK if s != refK and fixK[s].get("g_at_bound")]
+    rmsK = _ba_rms(fixK, edgesK, frK, anchK, refK, inlier_mm=300.0)
+    # 지역최적성: yaw ±0.5°, 위치 ±40mm 를 흔들어도 정합오차가 줄지 않아야 한다(정체 아님)
+    worse = True
+    for s in [x for x in anchK if x != refK]:
+        A = np.linalg.inv(fixK[s]["B"]); yy, _p, _r, ff = decompose_Aloc(A)
+        gg = 1.0 / max(_cosP_of(A), 1e-9)
+        for dy_ in (math.radians(0.5), -math.radians(0.5)):
+            probe = {k: dict(v) for k, v in fixK.items()}
+            probe[s] = {"B": B_roll0(yy + dy_, gg, -1.0 if ff else 1.0), "d": fixK[s]["d"]}
+            if _ba_rms(probe, edgesK, frK, anchK, refK, inlier_mm=300.0) < rmsK - 1e-6:
+                worse = False
+        for dd in ((40.0, 0.0), (-40.0, 0.0), (0.0, 40.0), (0.0, -40.0)):
+            probe = {k: dict(v) for k, v in fixK.items()}
+            probe[s] = {"B": fixK[s]["B"], "d": fixK[s]["d"] + np.array(dd)}
+            if _ba_rms(probe, edgesK, frK, anchK, refK, inlier_mm=300.0) < rmsK - 1e-6:
+                worse = False
+    p_bound = bool(at_bound) and worse
+    print(f"  [{'PASS' if p_bound else 'FAIL'}] I-d 경계(g=G_MIN) 활성집합: 걸린센서={at_bound or '없음'}"
+          f" · rms {rmsK:.0f}mm 가 지역최적={worse}")
+    ok_all &= p_bound
+
+    # J: 실제로 기울어진 설치(gG: roll ±)에 고정을 걸면 — 값은 0 이 되고, 모형 불일치를
+    #    RMS 증가로 '경고' 해야 한다(조용히 틀린 값을 저장하지 않는다).
+    resJ = estimate_positions(frames_of(gG), list(gG), min_overlap=15, ref_id="s1", fix_roll=True)
+    warned = any("Roll 0° 고정" in w for w in resJ["warnings"])
+    zeroJ = all(p["roll_deg"] == 0.0 for p in resJ["placements"].values() if p.get("anchored"))
+    print(f"  [{'PASS' if warned and zeroJ else 'FAIL'}] J 실제 기울어진 설치에 고정 → 0° 저장 + "
+          f"RMS 경고 (rms {resJ.get('global_rms_free', 0):.0f}→{resJ['global_rms']:.0f}mm)")
+    ok_all &= (warned and zeroJ)
+
     print("=== 결과:", "전부 PASS ✅" if ok_all else "일부 FAIL ❌", "===")
     return 0 if ok_all else 1
 
@@ -785,6 +1237,10 @@ def main() -> int:
     ap.add_argument("--min-overlap", type=int, default=20)
     ap.add_argument("--inlier-mm", type=float, default=300.0)
     ap.add_argument("--ref", default=None, help="기준센서 id(수평 설치로 아는 센서). 미지정 시 자동선택.")
+    ap.add_argument("--fix-roll", action="store_true",
+                    help="Roll 을 0° 로 고정(제약)하고 x·y·Yaw·Pitch 만 최적화")
+    ap.add_argument("--free-roll", action="store_true",
+                    help="--fix-roll 취소(Roll 도 추정). 뒤에 오는 인자가 우선이라 스크립트 기본값을 덮을 때 사용")
     ap.add_argument("--no-refine", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--yes", action="store_true")
@@ -882,7 +1338,9 @@ def main() -> int:
     print("  수집 표본:", "  ".join(f"{names.get(s,s)}:{len(series[s])}" for s in ids))
     frames = resample_to_frames(series, ids, hz=args.hz, max_gap_ms=args.max_gap_ms)
     result = estimate_positions(frames, ids, min_overlap=args.min_overlap,
-                                inlier_mm=args.inlier_mm, ref_id=args.ref, refine=not args.no_refine)
+                                inlier_mm=args.inlier_mm, ref_id=args.ref,
+                                refine=not args.no_refine,
+                                fix_roll=args.fix_roll and not args.free_roll)
     print_report(result, names)
     if result["warnings"]:
         print("\n  [경고]")

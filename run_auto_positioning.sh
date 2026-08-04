@@ -6,6 +6,7 @@
 #   ./run_auto_positioning.sh --dry-run       # 계산만(저장 안 함)
 #   ./run_auto_positioning.sh --host a.local b.local c.local
 #   ./run_auto_positioning.sh --camera-id 7   # 아래 CAMERA_ID 대신 이번만 다른 카메라로
+#   ./run_auto_positioning.sh --free-roll     # Roll 고정을 풀고 Roll 도 추정(FIX_ROLL=0 과 동일)
 #   ./run_auto_positioning.sh --selftest      # 합성 데이터로 알고리즘 검증(하드웨어 불필요)
 #
 # ※ 먼저 ./run_provision.sh 로 센서들을 Wi-Fi 에 연결해 두어야 합니다.
@@ -22,6 +23,12 @@ MEASURE_SECONDS=120   # 측정(걸어다니는) 시간(초). 센서 많거나 �
 START_DELAY=3        # 시작 전 카운트다운(초) — 자리 잡을 준비 시간
 HZ=15                # 샘플링/보간 주파수(Hz) — 보통 그대로 두면 됨
 REF=                 # 기준센서 id(수평 설치로 아는 센서). 비우면 자동선택. 예: REF=98bd80
+# Roll(기울어짐) 처리. 1 = 0° 로 '고정'한 채 x·y·Yaw·Pitch 만 최적화(권장).
+#   ★ run_auto_positioning_v2.sh 와 반드시 같은 값으로 두세요 — 두 스크립트가 같은
+#     epl_config.json 에 쓰기 때문에, 한쪽만 자유(0)로 두면 그 스크립트를 한 번 돌리는 순간
+#     roll 이 다시 노이즈를 흡수한 값(실측 예: −53.5°)으로 되돌아갑니다.
+#   센서를 실제로 갸우뚱하게 달았다면 0 으로.
+FIX_ROLL=1
 # 캘리브레이션할 카메라(stream) 식별자. id 접두가 이 카메라를 가리키는 센서에만
 # 접속·저장한다. 비우면(CAMERA_ID=) 카메라 구분 없이 등록된 전 센서를 쓴다.
 CAMERA_ID="1"
@@ -30,6 +37,7 @@ ORGANIZATION="pia"
 APOS_ARGS=(--seconds "$MEASURE_SECONDS" --start-delay "$START_DELAY" --hz "$HZ"
            --camera-id "$CAMERA_ID" --organization "$ORGANIZATION")
 if [ -n "$REF" ]; then APOS_ARGS+=(--ref "$REF"); fi
+if [ "$FIX_ROLL" = "1" ]; then APOS_ARGS+=(--fix-roll); fi
 
 if [ ! -d .venv ]; then
   echo "[setup] 가상환경(.venv) 생성…"

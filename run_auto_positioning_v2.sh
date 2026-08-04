@@ -6,6 +6,7 @@
 #   ./run_auto_positioning_v2.sh --gt-logs a.jsonl b.jsonl   # 특정 로그만(폴더보다 우선)
 #   ./run_auto_positioning_v2.sh --ref 98bd80    # 기준센서 지정(수평 설치로 아는 센서)
 #   ./run_auto_positioning_v2.sh --camera-id 7   # 아래 CAMERA_ID 대신 이번만 다른 카메라로
+#   ./run_auto_positioning_v2.sh --free-roll     # Roll 고정을 풀고 Roll 도 추정(아래 FIX_ROLL=0 과 동일)
 #   ./run_auto_positioning_v2.sh --selftest      # 합성 다중로그로 알고리즘 검증(하드웨어/파일 불필요)
 #
 # run_auto_positioning.sh(지금 걸어다니며 1회 측정) 와 결과물은 동일(epl_config.json 의
@@ -30,6 +31,12 @@ MAX_GAP_MS=700       # 보간 허용 최대 공백(ms)
 MIN_OVERLAP=20       # 센서쌍 최소 동시관측 표본(풀링하면 로그별로 적어도 합쳐서 채워짐)
 INLIER_MM=300        # RANSAC 인라이어 임계(mm)
 REF=                 # 기준센서 id(수평 설치로 아는 센서). 비우면 자동선택. 예: REF=98bd80
+# Roll(기울어짐) 처리. 1 = 0° 로 '고정'한 채 x·y·Yaw·Pitch 만 최적화(권장).
+#   센서를 갸우뚱하게 달지 않았다면 roll 은 관측이 약해(pitch 가 클 때만 보임) 노이즈를
+#   흡수하는 쓰레기통이 된다 → 고정하면 센서당 미지수가 6→4개로 줄어 나머지가 더 안정적.
+#   ★ '계산 후 0 으로 덮어쓰기'가 아니라 전단(shear) 없는 모형으로 다시 푸는 제약 최적화다.
+#   0 으로 두면 예전처럼 Roll 도 추정한다(실제로 기울여 설치한 경우).
+FIX_ROLL=1
 # 캘리브레이션할 카메라(stream) 식별자. 로그 헤더의 센서 중 id 접두가 이 카메라를
 # 가리키는 것만 사용한다. 비우면(CAMERA_ID=) 카메라 구분 없이 로그의 전 센서를 쓴다.
 CAMERA_ID="1"
@@ -39,6 +46,7 @@ APOS_ARGS=(--logs-dir "$GT_DIR" --hz "$HZ" --max-gap-ms "$MAX_GAP_MS"
            --min-overlap "$MIN_OVERLAP" --inlier-mm "$INLIER_MM" \
            --camera-id "$CAMERA_ID" --organization "$ORGANIZATION")
 if [ -n "$REF" ]; then APOS_ARGS+=(--ref "$REF"); fi
+if [ "$FIX_ROLL" = "1" ]; then APOS_ARGS+=(--fix-roll); fi
 
 if [ ! -d .venv ]; then
   echo "[setup] 가상환경(.venv) 생성…"
