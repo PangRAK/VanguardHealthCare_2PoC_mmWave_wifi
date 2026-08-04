@@ -290,6 +290,34 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
 
 ## [변경 로그]
 
+- **2026-08-05 (web SSE 폴백 결함 2개 — 조용한 0검출 / 재연결 폭주)**
+  - **왜**: 제품 PR #549 리뷰 지적. `mmwave_wifi_reader.py` 의 `WebSseReader` 는 이 레포가
+    원본이고 제품이 벤더링한 것이라 두 결함이 양쪽에 동일하게 있었다(파리티 규약에 따라
+    동시 수정 — 제품 `[VENDORED]` 헤더 변경 9).
+  - **결함 A — 타겟이 하나도 매칭되지 않았다.** `d["id"]`(object_id `sensor-target_1_x`)를
+    그대로 `name_to_update` 에 넘겼는데 정규식(`_TARGET_RE` 등)은 친화명 `"Target 1 X"` 를
+    요구한다. 매칭 실패는 예외가 아니라 `misc` 로 흘러가고(`apply_updates`) `mark_line` 도
+    계속 불리므로 **연결·수신 지표는 정상인데 검출만 0** 이고 stale 판정에조차 안 걸린다.
+    → `_sse_entity_name()` 이 `name`(전체 덤프에만 온다)과 object_id 양쪽을 같은 친화명으로
+      수렴시킨다(도메인 접두 제거 + `_`→공백). 이벤트 200개를 받고도 타겟 0이면 1회 경고.
+    · ESPHome 이 갱신 이벤트에 `name` 을 넣지 않는다는 전제(DETAIL_STATE)는 실기로 확정하지
+      않았다 → **양쪽 다 받는 방식**으로 만들었다. 실기로 확인되면 주석에 확정 표기.
+  - **결함 B — 정상 종료 시 backoff 를 안 탔다.** `time.sleep(2.0)` 이 `except` 블록에만
+    있어서, 서버가 `/events` 를 **예외 없이** 닫으면(또는 200 인데 본문이 빈 경우) `for` 가
+    소진되고 `while` 로 즉시 복귀해 tight loop 이 됐다 — 로그·CPU·장치 연타가 함께 폭주.
+    → 정상 종료도 재연결 사유로 취급해 `try/except` 밖의 공통 경로로 보내고, `time.sleep` →
+      `Event.wait` 로 바꿔 `stop()` 이 backoff 를 기다리지 않게 했다.
+  - **로그 래치**: '연결됨'/'재연결 대기' 에 진입 1회 + 회복 리셋을 적용했다. ★ 회복 신호는
+    **소켓 연결이 아니라 실제 수신**(`_on_event`)이다 — 붙자마자 닫히는 flapping 에서 연결
+    시점에 리셋하면 회전마다 2줄씩 쌓인다(제품 쪽 테스트가 이 설계 오류를 잡아냈다).
+  - **테스트**: 제품 레포에 3개 추가(`test_sse_object_id_maps_to_target` /
+    `test_sse_clean_close_backs_off_and_logs_once` /
+    `test_sse_warns_once_when_no_target_ever_matches`). 이 경로는 그전까지 테스트가 0개라
+    두 결함이 안 걸렸다. 이 레포에는 테스트 하네스가 없어 제품 쪽 테스트가 회귀를 막는다.
+  - **현장 영향**: `transport=web` 폴백이 그전까지 **사실상 동작하지 않았다**. 기본값은
+    `api`(Native)라 기본 경로는 무관하지만, Native 가 안 붙어 폴백을 쓴 적이 있다면 그때
+    재실이 0으로 보였을 것이다.
+
 - **2026-08-04 (자동 포지셔닝: Roll 을 0° 로 '제약' 하고 나머지만 최적화 — `--fix-roll`)**
   - **왜**: 실제 기록 로그 5개(`debug_logs/logs_for_optimization`)로 v2 를 돌리면 자유 해가
     Sensor 1 에 **Roll −53.5°**(좌우 스케일 ×1.68)를 붙였다. 센서를 그렇게 갸우뚱하게 달지

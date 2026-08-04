@@ -27,6 +27,12 @@ _TARGET_RE = re.compile(r"^Target\s+(\d+)\s+(X|Y|Speed|Angle|Distance|Resolution
 _ACTIVE_RE = re.compile(r"^Target\s+(\d+)\s+Active$", re.I)
 _ZONE_RE = re.compile(r"^Zone\s+(\d+)\s+Target Count$", re.I)
 
+# web SSE 폴백 전용 상수
+_SSE_READ_TIMEOUT_SECOND = 10.0
+_SSE_RECONNECT_BACKOFF_SECOND = 2.0
+# 이 수만큼 이벤트를 받고도 타겟이 하나도 매칭되지 않으면 이름 규약이 어긋난 것으로 본다.
+_SSE_NO_TARGET_EVENTS = 200
+
 
 def name_to_update(name: str, value) -> Optional[dict]:
     """ESPHome 엔티티 이름+값을 SensorState.apply_updates 용 dict 로 변환.
@@ -69,6 +75,27 @@ def name_to_update(name: str, value) -> Optional[dict]:
         return {"kind": "misc", "name": name, "value": float(value), "unit": ""}
     except (TypeError, ValueError):
         return None
+
+
+def _sse_entity_name(d: dict) -> str:
+    """web_server SSE 의 state 이벤트 dict 에서 **친화명**을 뽑는다.
+
+    ESPHome 은 `id` 에 object_id(`sensor-target_1_x`)를 싣고, 친화명(`name`,
+    `"Target 1 X"`)은 접속 직후 전체 덤프에만 넣는다. 그래서 둘 중 어느 형태가 와도 같은
+    이름으로 수렴시킨다 — 도메인 접두(`sensor-`/`binary_sensor-`)를 떼고 `_` 를 공백으로
+    바꾸면 위의 세 정규식(전부 `re.I`)에 그대로 매칭된다.
+
+    ★ object_id 를 그대로 name_to_update 에 넘기면 정규식이 하나도 안 맞고, 매칭 실패가
+      예외가 아니라 `misc` 로 흘러가(mmwave_reader.apply_updates) **검출 0 인데 연결·수신
+      지표만 정상**인 상태가 된다. mark_line 이 계속 불려 stale 판정에도 안 걸린다.
+    """
+    nm = str(d.get("name") or "").strip()
+    if nm:
+        return nm
+    oid = str(d.get("id") or "").strip().split("/", 1)[-1]  # 옛 'sensor/xxx' 형식도 수용
+    if "-" in oid:
+        oid = oid.split("-", 1)[1]
+    return oid.replace("_", " ").strip()
 
 
 # ----------------------------------------------------------------- Native API
@@ -165,18 +192,68 @@ class WebSseReader(threading.Thread):
         self.host = host
         self.port = port
         self._stop = threading.Event()
+        # 재연결 알림 상태 — 진입 시 1회만 알리고 회복(=실제 수신) 시 리셋
+        self._connected = False
+        self._reconnects = 0
+        self._reconnect_warned = False
+        # 이름 규약 어긋남 감지 — 이벤트는 오는데 타겟이 0인 상태
+        self._events = 0
+        self._targets = 0
+        self._no_target_warned = False
 
     def stop(self):
         self._stop.set()
+
+    def _on_connected(self, url: str) -> None:
+        """소켓 연결 성공 — 상태만 갱신하고, **첫 연결만** 알린다.
+
+        ★ 연결 성공은 '회복' 이 아니다. 서버가 붙자마자 스트림을 닫는 flapping 에서는
+          연결/종료가 반복되므로 여기서 래치를 리셋하면 경고가 매 회전 다시 찍힌다.
+          회복 신호는 실제로 데이터가 들어온 시점(_on_event)이다."""
+        self.state.set_conn(True, self.host, "wifi")
+        if not self._connected:
+            self._connected = True
+            print(f"[wifi-web] 연결됨: {url}")
+
+    def _on_event(self) -> None:
+        """이벤트 1건 수신 — 재연결을 반복하던 상태였다면 회복을 알리고 상태를 초기화한다."""
+        self._events += 1
+        if not self._reconnect_warned:
+            return
+        print(f"[wifi-web] 수신 회복 — 재연결 {self._reconnects}회 후 재개")
+        self._reconnect_warned = False
+        self._reconnects = 0
+
+    def _warn_reconnect(self, url: str, why: str) -> None:
+        """재연결 대기 — 상태 진입 시 1회만 알린다(회복 시 _on_event 가 요약)."""
+        self._reconnects += 1
+        if self._reconnect_warned:
+            return
+        self._reconnect_warned = True
+        print(f"[wifi-web] 재연결 대기: {url} ({why})")
+
+    def _warn_if_no_target(self) -> None:
+        """이벤트는 들어오는데 타겟이 하나도 매칭되지 않으면 **1회만** 경고한다.
+
+        엔티티 이름 규약이 어긋나면 name_to_update 가 예외 없이 misc 로 흘려보내므로
+        검출 0 인데 연결·수신 지표는 정상으로 보이고 mark_line 때문에 stale 판정에도 안
+        걸린다. 타겟이 한 번이라도 매칭되면 규약이 맞다는 뜻이라 회복 리셋은 없다."""
+        if self._targets or self._no_target_warned or self._events < _SSE_NO_TARGET_EVENTS:
+            return
+        self._no_target_warned = True
+        print(
+            f"[wifi-web] ⚠ 이벤트 {self._events}개를 받았지만 타겟이 하나도 매칭되지 "
+            f"않았습니다: {self.host} — ESPHome 엔티티 이름 규약이 바뀐 것으로 보입니다. "
+            "Native API 경로(transport=api)로 전환하거나 펌웨어 엔티티 이름을 확인하세요."
+        )
 
     def run(self):
         url = f"http://{self.host}:{self.port}/events"
         while not self._stop.is_set():
             try:
                 req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    self.state.set_conn(True, self.host, "wifi")
-                    print(f"[wifi-web] 연결됨: {url}")
+                with urllib.request.urlopen(req, timeout=_SSE_READ_TIMEOUT_SECOND) as r:
+                    self._on_connected(url)
                     event = None
                     for raw in r:
                         if self._stop.is_set():
@@ -189,17 +266,27 @@ class WebSseReader(threading.Thread):
                                 d = json.loads(line[5:].strip())
                             except ValueError:
                                 continue
-                            name = str(d.get("id", "")).split("/", 1)[-1]
                             val = d.get("value", d.get("state"))
-                            u = name_to_update(name, val)
+                            u = name_to_update(_sse_entity_name(d), val)
                             if u:
+                                if u["kind"] in ("target", "target_active"):
+                                    self._targets += 1
                                 self.state.apply_updates([u], time.monotonic())
+                            self._on_event()
                             self.state.mark_line(time.monotonic())
+                            self._warn_if_no_target()
+                # ★ 예외 없이 여기 도달하면 서버가 스트림을 **정상 종료**한 것이다. 이 경우도
+                #   재연결 사유이므로 아래 공통 경로로 보낸다 — 옛 코드는 backoff 가 except
+                #   블록에만 있어서 tight loop 이 됐다(로그·CPU·장치 연타가 함께 폭주).
+                why = "서버가 스트림을 닫음"
             except Exception as e:  # noqa: BLE001
-                self.state.set_conn(False, self.host, "disconnected")
-                if not self._stop.is_set():
-                    print(f"[wifi-web] 재연결 대기({e})")
-                    time.sleep(2.0)
+                why = str(e)
+            self.state.set_conn(False, self.host, "disconnected")
+            if self._stop.is_set():
+                break
+            self._warn_reconnect(url, why)
+            # sleep 대신 Event.wait — stop() 이 backoff 를 기다리지 않고 즉시 끊는다.
+            self._stop.wait(_SSE_RECONNECT_BACKOFF_SECOND)
 
 
 def make_wifi_reader(state, host: str, transport: str = "api",
