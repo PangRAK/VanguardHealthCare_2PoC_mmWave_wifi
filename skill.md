@@ -171,6 +171,7 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
 ./run.sh                                 # 웹 시각화 (융합 파라미터는 run.sh 상단)
 ./run_gui.sh                             # PyQt GUI
 ./run_provision.sh --ssid <SSID> --password <PW>   # USB로 Wi-Fi 프로비저닝
+./run_replay.sh                          # 기록 로그를 '지금 세팅'으로 재생 → analysis/replay.mp4
 ```
 
 ## 8. 병원(현장) 배포 체크리스트
@@ -290,6 +291,59 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
 
 ## [변경 로그]
 
+- **2026-08-05 (리플레이 영상에 장기체류 경보 재현 — 테두리·마커·알림음)**
+  - `run_replay.sh` / `replay_video.py` 에 `--dwell-alert-sec`(기본 300초 = `run_gui.sh` 와 동일,
+    0=끔) 추가. 판정 규칙은 라이브와 같은 코드 규약: dwell_sec ≥ 임계인 confirmed 트랙
+    (`gui_qt.MainWindow._alert_id_set`). 재현 항목 ① 화면 빨간 테두리(패널마다 독립 — 비교
+    모드에선 좌/우가 각자 켜진다) ② 빨간 마커+glow(`RadarPlot.alert_ids` 그대로 재사용)
+    ③ 제목 줄 `⚠ OVERSTAY #n · over 5m00s`.
+  - **알림음**: 영상은 실시간이 아니라 `QApplication.beep()` 을 쓸 수 없다 → 경보 시각마다 880Hz
+    0.18초 '삐' 를 넣은 모노 WAV 를 stdlib `wave` 로 만들고 ffmpeg 2번째 입력(aac)으로 함께
+    인코딩한다. 재알림 간격은 gui_qt 와 같은 5초(`--alert-beep-period`). `--no-alert-beep` 이면
+    화면 표시만(오디오 트랙 없음).
+  - ⚠ **시간 설정 함정**: 기록이 2분인데 기본 임계가 300초라 그대로 돌리면 경보가 한 번도 안 뜬다.
+    그래서 실행 로그에 "최대 체류 N초 → 임계를 낮추세요(--dwell-alert-sec …)" 안내를 넣었다.
+    이 3개 로그의 최대 체류는 107.3초라 60초로 두면 경보 47.4초·알림음 10회가 나온다.
+- **2026-08-05 (최적화 채점 재조정 — "등장한 사람을 모두 잡았는가"(표현) 벌점 추가)**
+  - **증상**: 최적화 결과 NOISE_RADIUS 가 3000mm(방 전체)까지 커지고 3번 로그의 사람이 절반 넘게
+    화면에서 사라졌다(cov 0.504). 그런데 종합 score 는 75.7 로 '최적'.
+  - **원인(채점 구멍)**: 커버리지를 **전원 합산(pooled)** 으로만 봤다 → 3인 중 한 명을 통째로
+    놓쳐도 벌점은 W_COVERAGE×(1/3)≈167 뿐인데, 그 사람을 놓치면 **그 사람의 스위칭·중복
+    벌점(수천점)이 같이 사라진다** = "안 잡는 게 이득". 게다가 noise_radius 로 흡수된 관측은
+    `fusion.py _infer` (b) 분기에서 그냥 버려져(트랙 members 에 안 들어감) 교차병합(xmerge)
+    벌점에도 안 걸린다 → 채점이 그 손해를 볼 방법이 아예 없었다.
+  - **수정**(`optimize_fusion.score_run_multi`): 사람 단위 '표현(repr)' 벌점 4개 추가. 전부
+    present 프레임 수와 무관하게 1명당 같은 무게 — 오래 머문 사람이 짧게 들르는 사람을 못 가린다.
+    · `cov_person`(사람별 커버리지 결손 Σ(1−cov_g), W=3000) · `miss_person`(cov_g<0.6 인 사람 수,
+    W=20000) · `acq`('등장'~첫 확정 트랙 대기 초, W=300/s) · `never_acq`(등장했는데 끝까지
+    미획득, W=2000). 겹침(collision) 구간은 센서가 한 명으로 측정하므로 acq 집계에서 제외(R2 원칙).
+    '등장' 경계는 스위칭 채점과 같은 EXIT_GAP 이탈 기준을 쓴다.
+  - 가중치는 `run_optimization.sh` 의 `MIN_COV_PERSON/W_MISS_PERSON/W_COV_PERSON/W_ACQ/W_NEVER_ACQ`.
+    미추적 1명 = 스위칭 20회로 잡아 "한 명 버리기"가 항상 손해가 되게 했다.
+  - **결과**(같은 3개 로그·ITERS=3000): 3명 동시 present 496프레임의 평균 추적 인원
+    **2.23 → 2.94명**, 사람별 cov 1.0/0.974/**0.504** → 1.0/0.988/**0.972**, 획득대기 39.4s→3.0s,
+    NOISE_RADIUS 3000→2000, MAX_MISS 7.0→1.5. 대가로 sw_in 0→2·dup 0→2·체류결손 0→16.1s 가
+    '드러났다'(예전엔 그 사람을 안 잡아서 채점 자체가 안 됐던 항목).
+  - 상관표에 **표현** 열이 생겼다. NOISE_RADIUS 는 싱글 −0.80 / 표현 +0.71 → 종합 +0.01 로
+    상쇄된다 = "노이즈는 잡지만 사람도 삼킨다"는 트레이드오프가 이제 점수에 보인다.
+  - 옛 결과 보관: `debug_logs/backup/best_params.pre-repr.yaml`,
+    비교 영상 `debug_logs/analysis/replay_old_params.mp4`(옛) vs `replay.mp4`(새).
+  - ⚠ 남은 판단: NOISE_RADIUS=2000 은 여전히 크다(이 3개 로그에서는 아무도 안 삼켰다는 뜻일 뿐).
+    동선이 더 겹치는 로그를 추가하면 자동으로 더 내려간다 — 로그를 더 모으는 게 가장 확실하다.
+- **2026-08-05 (`run_replay.sh` 신설 — 튜닝 없는 '현재 세팅' 재생 영상)**
+  - **왜**: 세팅을 바꾼 뒤 확인하려면 `run_optimization.sh`(수천 회 탐색, 수십 분)를 다시 돌려야
+    비교 영상이 나왔다. 탐색 없이 **지금 세팅 그대로만** 재생해 MP4 로 남기는 경로가 필요.
+  - `run_replay.sh`: `debug_logs/logs_for_optimization/*.jsonl` 자동 수집(최적화와 같은 로그) →
+    `debug_logs/analysis/replay.mp4`. `--per-log` 면 로그마다 1개씩.
+  - **HP 결정 규칙은 `run_gui.sh` 와 동일**(설정 블록 ← `PARAMS_FILE`=best_params.yaml ← `--set`),
+    `_interval_second` 도 같은 방식으로 `INTERVAL_SECOND` 에 동기화 → **라이브 GUI 와 같은 세팅**으로
+    재생된다. 장면 합성값(INTERVAL/COLLISION/MARGIN)은 `run_optimization.sh` 와 맞춰 둘 것.
+  - `replay_video.py`: 좌우 비교 전용 → **패널 N개 일반화**. `--best-params` 있으면 기존 전/후 2패널,
+    없으면 단일 패널(`--params` 파일 → `--set NAME=VAL` 로 덮어씀, 둘 다 없으면 기록 당시 HP).
+    `--gt-logs` 는 `--logs` 별칭으로 유지(기존 호출 그대로 동작). **로그 1개도 재생 가능**해졌다
+    (`build_single`) — `merge_gt.build_gt` 는 ≥2개를 요구하므로 1개면 겹치기 없이 그대로 장면 구성.
+  - 검증: 3개 로그 겹치기(1195프레임 @10fps, 960×860) / `--per-log` 3개 / `--set` 오버라이드 /
+    기존 `--best-params` 비교 모드 회귀 — 모두 정상 생성.
 - **2026-08-05 (web SSE 폴백 결함 2개 — 조용한 0검출 / 재연결 폭주)**
   - **왜**: 제품 PR #549 리뷰 지적. `mmwave_wifi_reader.py` 의 `WebSseReader` 는 이 레포가
     원본이고 제품이 벤더링한 것이라 두 결함이 양쪽에 동일하게 있었다(파리티 규약에 따라

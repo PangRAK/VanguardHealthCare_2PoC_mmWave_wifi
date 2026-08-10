@@ -25,6 +25,20 @@ run_debug_gui.sh 가 남긴 원시 기록(JSONL)을 읽어, 그 안의 dets(융�
   · EDGE  : 검출은 되지만 마진 밖(가장자리). 최소 한 센서엔 잡힘 → 스위칭/중복 금지(중간 벌점).
   · coverage: INSIDE 인데 confirmed 트랙이 없으면 '추적 실패' — 스위칭 0을 노린 꼼수 방지용 벌점.
 
+★ 표현(representation) 채점 — "등장한 사람은 모두 잡혀야 한다" (다중 모드)
+  예전 채점은 커버리지를 **전원 합산(pooled)** 으로만 봤다. 그러면 3인 GT 에서 한 명을 통째로
+  놓쳐도 벌점이 W_COVERAGE×(1/3) 뿐인데, 그 사람을 놓치면 그 사람의 스위칭·중복 벌점(수천점)이
+  **함께 사라진다** → "안 잡는 게 이득"인 역인센티브가 생긴다. 실제로 그 결과 NOISE_RADIUS 가
+  2500mm 까지 커져(확정 트랙 반경 안의 '처음 보는' 점을 흡수 → fusion.py `_infer` (b) 분기)
+  세 번째 사람이 절반 넘게 트랙 없이 사라졌다(cov 0.50, 종합 score 75.7 로 '최적'). 흡수된 점은
+  트랙 members 에도 안 들어가므로 교차병합(xmerge) 벌점에도 안 걸린다.
+  그래서 사람 단위 항목 4개를 추가했다(전부 사람마다 균등 가중 — present 프레임 수와 무관):
+    · cov_person  : 사람별 커버리지 결손 Σ(1−cov_g)      → W_COV_PERSON
+    · miss_person : cov_g < MIN_COV_PERSON 인 사람 수     → W_MISS_PERSON (사실상 미추적)
+    · acq         : '등장'부터 첫 확정 트랙까지 기다린 초 → W_ACQ (새로 나타난 사람 획득 지연)
+    · never_acq   : 등장했는데 끝까지 못 잡은 횟수        → W_NEVER_ACQ
+  겹침(collision) 구간은 센서가 한 명으로 측정하므로 acq 집계에서 제외한다(R2 와 같은 원칙).
+
 용법:  ./run_optimization.sh   (또는)   python optimize_fusion.py --log <파일> [옵션]
 """
 from __future__ import annotations
@@ -58,16 +72,16 @@ KW2NAME = {v: k for k, v in NAME2KW.items()}
 #                            (그 안의 ReID 실패를 체류결손으로 채점하는 전제) 더 늘리려면
 #                            DWELL_GAP 도 같이 올려야 한다.
 #
-#   ⚠ 채점 함수에 없는 위험은 사람이 봐야 한다 — 벌점은 스위칭/중복/교차병합/커버리지/체류결손
-#     뿐이므로 아래 항목은 "점수는 좋아지는데 현장에서 나빠지는" 방향으로 끌릴 수 있다.
-#     최적 결과가 이 값들의 상단을 고르면 compare.mp4 로 눈으로 확인할 것:
+#   ⚠ 채점 함수에 없는 위험은 사람이 봐야 한다 — 아래 항목은 "점수는 좋아지는데 현장에서
+#     나빠지는" 방향으로 끌릴 수 있다. 최적 결과가 이 값들의 상단을 고르면 영상으로 확인할 것:
 #       · WINDOW      지연이 점수에 안 잡힌다. 0.1초 기준 30 = 3.0초 스무딩 창.
-#       · NOISE_RADIUS 확정점 반경 내 '처음 보는' 점을 흡수 → 크면 **두 번째 사람**을 유령으로
-#                      삼킬 수 있다(3000mm = 방 전체). 재실 카운트 누락 위험.
-#       · REID_DIST    센서 병합 한계(~0.7m)를 넘는 값은 문 근처에서 '다른 사람'이 나간 사람
-#                      ID 를 가로챌 위험이 커진다(교차병합 벌점이 3개 로그로는 다 못 잡는다).
-#       · MAX_MISS     안 보여도 트랙을 유지하는 시간 → 잔상·인원 과다. 제품에선 체류시간이
-#                      사람이 나간 뒤 이 값만큼 더 늘어난다(알람 임계 판정에 직접 영향).
+#       · REID_DIST   센서 병합 한계(~0.7m)를 넘는 값은 문 근처에서 '다른 사람'이 나간 사람
+#                     ID 를 가로챌 위험이 커진다(교차병합 벌점이 3개 로그로는 다 못 잡는다).
+#       · MAX_MISS    안 보여도 트랙을 유지하는 시간 → 잔상·인원 과다. 제품에선 체류시간이
+#                     사람이 나간 뒤 이 값만큼 더 늘어난다(알람 임계 판정에 직접 영향).
+#     · NOISE_RADIUS 는 예전엔 이 목록에 있었다(확정점 반경 내 '처음 보는' 점을 흡수 → 두 번째
+#       사람을 통째로 삼킴). 2026-08-05 부터 그 손해가 표현(repr) 벌점으로 채점되므로 목록에서
+#       뺐다 — 삼키면 cov_person/miss_person/acq 로 즉시 큰 벌점이 붙는다(머리말 '표현 채점').
 SPACE = {
     "WINDOW": [3, 5, 8, 10, 12, 15, 20, 25, 30],        # ↑확장(0.1초 기준 30 = 3.0초 창)
     "STRIDE": [1, 2, 3, 4],
@@ -319,7 +333,8 @@ def score_run(frames, conf_per_frame, cls_per_frame, *, exit_gap, weights, min_c
     return score, bd
 
 
-def score_run_multi(gt, conf_per_frame, *, exit_gap, weights, min_cov, collision_mm, dwell_gap=8.0):
+def score_run_multi(gt, conf_per_frame, *, exit_gap, weights, min_cov, collision_mm, dwell_gap=8.0,
+                    min_cov_person=0.6):
     """다중-인물 스코어러. score_run 을 '사람별'로 확장 + 교차-인물 병합 벌점.
 
     · 사람 g 의 presence 는 그 사람 소스 로그의 raw 로만 판정(gt['cls'][i][g]).
@@ -331,13 +346,18 @@ def score_run_multi(gt, conf_per_frame, *, exit_gap, weights, min_cov, collision
     · 체류시간(dwell) 정확도: 사람별로 '기대 체류'(ep_dwell = 이번 체류 에피소드 동안 present 시간,
       완전 이탈 시 0으로 리셋)와 트래커가 보고한 대표 트랙의 dwell_sec 를 비교한다. ID 가 유지되면
       (ReID 포함) dwell_sec ≈ ep_dwell → 결손 0. 조각나면(새 ID) dwell_sec 가 리셋돼 결손 발생.
-      dwell_deficit = 에피소드 내 최대 결손(초) — '정체성 조각으로 잃어버린 연속 체류시간'."""
+      dwell_deficit = 에피소드 내 최대 결손(초) — '정체성 조각으로 잃어버린 연속 체류시간'.
+    · 표현(representation): 사람 단위로 '잡혔는가'를 본다 — cov_person(사람별 커버리지 결손),
+      miss_person(cov_g<min_cov_person = 사실상 미추적), acq(등장~첫 확정 트랙 대기 초),
+      never_acq(등장했는데 끝까지 미획득). 모듈 머리말 '표현 채점' 참조. 전원 합산 커버리지만
+      보던 예전 채점의 "한 명 통째로 버리는 게 이득" 역인센티브를 막는 항목들이다."""
     N = gt["n"]; frames = gt["frames"]; cls = gt["cls"]; pos = gt["positions"]
     tid2gt = gt["tid2gt"]
     st = [dict(prev_dom=None, prev_pos=None, out_run=0.0, exit_latched=False,
                sw_in=0, sw_ed=0, dup_in=0, dup_ed=0, in_dup_in=False, in_dup_ed=False,
                present=0, present_cov=0, inside=0, ids=set(), reentry=0,
-               ep_start=None, dwell_deficit=0.0)
+               ep_start=None, dwell_deficit=0.0,
+               app_open=False, acquired=False, appears=0, acq_wait=0.0, never_acq=0)
           for _ in range(N)]
     xmerge_frames = xmerge_ep = 0
     in_xmerge = False
@@ -427,10 +447,25 @@ def score_run_multi(gt, conf_per_frame, *, exit_gap, weights, min_cov, collision
                 s["out_run"] += dt
                 if s["out_run"] >= exit_gap:
                     s["exit_latched"] = True             # (스위칭 재진입 로직용)
+                    if s["app_open"]:                    # 진짜 이탈 = '등장' 1회 종료
+                        s["app_open"] = False
+                        if not s["acquired"]:
+                            s["never_acq"] += 1          # 등장했는데 끝까지 트랙을 못 얻음
                 if s["out_run"] >= dwell_gap:            # 긴 공백 → 체류 에피소드 종료(기대 dwell 리셋)
                     s["ep_start"] = None
                 s["in_dup_in"] = s["in_dup_ed"] = False
                 continue
+            # ── 등장(appearance) & 획득 지연 ─────────────────────────────────────────
+            # '등장' = 완전 이탈(exit_gap) 후 다시 검출되기 시작한 구간(로그 시작도 1회 등장).
+            # 등장했는데 확정 트랙이 안 생기는 시간을 초 단위로 벌점 → 새로 나타난 사람을
+            # noise_radius 로 흡수해 버리거나 확정이 한없이 늦는 HP 를 직접 억제한다.
+            # 겹침(contended) 구간은 센서가 한 명으로 측정 → 독립 획득 불가라 대기시간에서 제외.
+            if not s["app_open"]:
+                s["app_open"] = True; s["acquired"] = False; s["appears"] += 1
+            if cf:
+                s["acquired"] = True
+            elif not contended:
+                s["acq_wait"] += dt
             # 체류 에피소드 시작 = 이 사람의 첫 '확정 트랙' 관측 시각(t). dom.first_seen 과 정렬돼
             # 완벽 추적이면 결손 0(프레임/stride 양자화 노이즈 없음 — 리뷰 지적). exit_gap 이 아니라
             # dwell_gap(>reid_max_gap 탐색범위) 로만 리셋 → (exit_gap, reid_max_gap] 구간의 ReID 실패도
@@ -499,6 +534,11 @@ def score_run_multi(gt, conf_per_frame, *, exit_gap, weights, min_cov, collision
                 meas = dom.get("dwell_sec", 0.0)
                 s["dwell_deficit"] = max(s["dwell_deficit"], (t - s["ep_start"]) - meas)
 
+    # 마지막까지 열려 있던 '등장'(로그가 끝날 때 아직 방 안) 마무리
+    for s in st:
+        if s["app_open"] and not s["acquired"]:
+            s["never_acq"] += 1
+
     # 집계
     W = weights
     tot_sw_in = sum(s["sw_in"] for s in st)
@@ -511,22 +551,37 @@ def score_run_multi(gt, conf_per_frame, *, exit_gap, weights, min_cov, collision
     invalid = tot_present > 0 and cov < min_cov
     tot_extra = sum(max(0, len(s["ids"]) - 1 - s["reentry"]) for s in st)
     tot_dwell_def = sum(s["dwell_deficit"] for s in st)      # 잃어버린 연속 체류시간(초) 합
+    # 표현(representation): 사람 단위 — present 프레임 수와 무관하게 1명당 같은 무게로 본다.
+    #   (pooled cov 는 오래 머문 사람이 지배해 '짧게 들르는 사람'을 통째로 버려도 티가 안 났다)
+    cov_g = [((s["present_cov"] / s["present"]) if s["present"] else 1.0) for s in st]
+    cov_loss = sum(1.0 - c for c, s in zip(cov_g, st) if s["present"] > 0)
+    n_missing = sum(1 for c, s in zip(cov_g, st) if s["present"] > 0 and c < min_cov_person)
+    tot_acq = sum(s["acq_wait"] for s in st)                 # 등장 후 미획득 대기(초) 합
+    tot_never = sum(s["never_acq"] for s in st)
     # 싱글(개인 추적) = 사람별 스위칭/중복/커버리지/무효, 멀티(교차) = 교차-인물 병합,
-    # dwell(체류시간) = 정체성 조각으로 잃은 연속 체류시간(초)×가중. 종합=셋의 합.
+    # dwell(체류시간) = 정체성 조각으로 잃은 연속 체류시간(초)×가중,
+    # 표현(repr) = 등장한 사람을 모두 잡았는가. 종합 = 넷의 합.
     single_score = ((W["invalid"] if invalid else 0.0)
                     + W["sw_in"] * tot_sw_in + W["sw_ed"] * tot_sw_ed
                     + W["dup_in"] * tot_dup_in + W["dup_ed"] * tot_dup_ed
                     + W["cov"] * (1.0 - cov) + W["ids"] * tot_extra)
     multi_score = W["xmerge_ep"] * xmerge_ep + W["xmerge_fr"] * xmerge_frames
     dwell_score = W.get("dwell", 0.0) * tot_dwell_def
-    score = single_score + multi_score + dwell_score
+    repr_score = (W.get("cov_person", 0.0) * cov_loss + W.get("miss_person", 0.0) * n_missing
+                  + W.get("acq", 0.0) * tot_acq + W.get("never_acq", 0.0) * tot_never)
+    score = single_score + multi_score + dwell_score + repr_score
     per = [dict(sw_in=s["sw_in"], sw_ed=s["sw_ed"], dup=s["dup_in"] + s["dup_ed"],
-                n_ids=len(s["ids"]), reentry=s["reentry"],
-                cov=round((s["present_cov"] / s["present"]) if s["present"] else 1.0, 3),
-                present=s["present"], dwell_deficit=round(s["dwell_deficit"], 2)) for s in st]
+                n_ids=len(s["ids"]), reentry=s["reentry"], cov=round(c, 3),
+                present=s["present"], dwell_deficit=round(s["dwell_deficit"], 2),
+                appears=s["appears"], acq_wait=round(s["acq_wait"], 2),
+                never_acq=s["never_acq"], missing=(s["present"] > 0 and c < min_cov_person))
+           for s, c in zip(st, cov_g)]
     bd = dict(score=round(score, 1),
               single_score=round(single_score, 1), multi_score=round(multi_score, 1),
               dwell_score=round(dwell_score, 1), dwell_deficit=round(tot_dwell_def, 2),
+              repr_score=round(repr_score, 1), cov_loss=round(cov_loss, 3),
+              n_missing=n_missing, acq_wait=round(tot_acq, 2), never_acq=tot_never,
+              min_cov_person=round(min(cov_g), 3) if cov_g else 1.0,
               sw_in=tot_sw_in, sw_ed=tot_sw_ed,
               dup=tot_dup_in + tot_dup_ed, dup_in=tot_dup_in, dup_ed=tot_dup_ed,
               xmerge_ep=xmerge_ep, xmerge_frames=xmerge_frames,
@@ -641,7 +696,7 @@ def _pearson(xs, ys):
 def compute_correlations(samples, active_names):
     """samples=[(choice,bd)] → [(name, {single,multi,total: r|None})]. score 는 벌점(낮을수록 좋음)."""
     targets = (("single", "single_score"), ("multi", "multi_score"),
-               ("dwell", "dwell_score"), ("total", "score"))
+               ("dwell", "dwell_score"), ("repr", "repr_score"), ("total", "score"))
     rows = []
     for name in active_names:
         xs = [_numify(choice[name]) for choice, _ in samples]
@@ -658,9 +713,10 @@ def report_correlations(rows, n_samples):
         return "   n/a" if r is None else f"{r:+5.2f}"
     print(f"\n[상관계수] HP ↔ score (Pearson · 랜덤표본 {n_samples}개). "
           f"+면 값↑=score↑(나빠짐), −면 값↑=score↓(좋아짐). |값| 클수록 영향 큼")
-    print(f"  {'param':16s}  {'싱글':>6} {'멀티':>6} {'체류':>6} {'종합':>6}")
+    print(f"  {'param':16s}  {'싱글':>6} {'멀티':>6} {'체류':>6} {'표현':>6} {'종합':>6}")
     for name, rec in sorted(rows, key=lambda r: -abs(r[1]["total"] or 0.0)):
-        print(f"  {name:16s}  {f(rec['single'])} {f(rec['multi'])} {f(rec['dwell'])} {f(rec['total'])}")
+        print(f"  {name:16s}  {f(rec['single'])} {f(rec['multi'])} {f(rec['dwell'])} "
+              f"{f(rec['repr'])} {f(rec['total'])}")
 
 
 # ---- SVG (외부 의존성 없이 stdlib 로 벡터 그림 생성) ----
@@ -742,16 +798,17 @@ def save_analysis(rows, bd_base, best_bd, out_dir, n_samples):
     def fc(r):
         return "" if r is None else f"{r:.4f}"
     with open(os.path.join(out_dir, "corr.csv"), "w", encoding="utf-8") as fh:
-        fh.write("param,single,multi,dwell,total\n")
+        fh.write("param,single,multi,dwell,repr,total\n")
         for name, rec in rows:
             fh.write(f"{name},{fc(rec['single'])},{fc(rec['multi'])},"
-                     f"{fc(rec['dwell'])},{fc(rec['total'])}\n")
+                     f"{fc(rec['dwell'])},{fc(rec['repr'])},{fc(rec['total'])}\n")
 
     sub = "양(+,빨강)=값↑ 이면 score↑(나빠짐) · 음(−,초록)=값↑ 이면 score↓(좋아짐)"
     for key, title in (("single", "싱글(개인 추적) 기준"),
                        ("multi", "멀티(교차-인물 병합) 기준"),
                        ("dwell", "체류시간(연속 dwell 결손) 기준"),
-                       ("total", "종합(싱글+멀티+체류) 기준")):
+                       ("repr", "표현(등장 인원 전원 추적) 기준"),
+                       ("total", "종합(싱글+멀티+체류+표현) 기준")):
         pairs = sorted(((n, rec[key]) for n, rec in rows),
                        key=lambda pr: (pr[1] is None, -abs(pr[1] or 0.0)))
         with open(os.path.join(out_dir, f"corr_{key}.svg"), "w", encoding="utf-8") as fh:
@@ -761,6 +818,9 @@ def save_analysis(rows, bd_base, best_bd, out_dir, n_samples):
            ("싱글 score", bd_base["single_score"], best_bd["single_score"]),
            ("멀티 score", bd_base["multi_score"], best_bd["multi_score"]),
            ("체류 score", bd_base.get("dwell_score", 0), best_bd.get("dwell_score", 0)),
+           ("표현 score", bd_base.get("repr_score", 0), best_bd.get("repr_score", 0)),
+           ("미추적 인원", bd_base.get("n_missing", 0), best_bd.get("n_missing", 0)),
+           ("획득대기(초)", bd_base.get("acq_wait", 0), best_bd.get("acq_wait", 0)),
            ("스위칭(마진)", bd_base["sw_in"], best_bd["sw_in"]),
            ("스위칭(엣지)", bd_base["sw_ed"], best_bd["sw_ed"]),
            ("중복 dup", bd_base["dup"], best_bd["dup"]),
@@ -803,7 +863,18 @@ def main():
     ap.add_argument("--exit-gap", type=float, default=1.5, help="이 시간(초) 이상 전 센서 미검출=진짜 이탈(스위칭 재진입 허용)")
     ap.add_argument("--dwell-gap", type=float, default=8.0,
                     help="[다중] 체류 에피소드 종료로 보는 공백(초). reid-max-gap 탐색범위보다 커야 함(그 안의 ReID 실패도 dwell 결손으로 채점)")
-    ap.add_argument("--min-coverage", type=float, default=0.4, help="INSIDE 최소 추적 커버리지(미만=무효)")
+    ap.add_argument("--min-coverage", type=float, default=0.4, help="전원 합산 최소 추적 커버리지(미만=무효)")
+    ap.add_argument("--min-coverage-person", type=float, default=0.6,
+                    help="[다중] 사람별 최소 커버리지 — 미만이면 그 사람은 '사실상 미추적'으로 보고 "
+                         "--w-miss-person 벌점(기본 0.6)")
+    ap.add_argument("--w-cov-person", type=float, default=3000.0,
+                    help="[다중] 사람별 커버리지 결손 Σ(1−cov_g) 벌점. 사람마다 균등 가중")
+    ap.add_argument("--w-miss-person", type=float, default=20000.0,
+                    help="[다중] cov_g < --min-coverage-person 인 사람 1명당 벌점(사실상 미추적)")
+    ap.add_argument("--w-acq", type=float, default=300.0,
+                    help="[다중] '등장'부터 첫 확정 트랙까지 기다린 시간 1초당 벌점(새 인원 획득 지연)")
+    ap.add_argument("--w-never-acq", type=float, default=2000.0,
+                    help="[다중] 등장했는데 끝까지 확정 트랙을 못 얻은 횟수당 벌점")
     ap.add_argument("--w-switch-inside", type=float, default=1000.0)
     ap.add_argument("--w-switch-edge", type=float, default=400.0)
     ap.add_argument("--w-dup-inside", type=float, default=300.0)
@@ -829,7 +900,9 @@ def main():
                    dup_in=args.w_dup_inside, dup_ed=args.w_dup_edge,
                    cov=args.w_coverage, ids=args.w_ids, invalid=args.w_invalid,
                    xmerge_ep=args.w_xmerge_ep, xmerge_fr=args.w_xmerge_fr,
-                   dwell=args.w_dwell)
+                   dwell=args.w_dwell,
+                   cov_person=args.w_cov_person, miss_person=args.w_miss_person,
+                   acq=args.w_acq, never_acq=args.w_never_acq)
 
     # 고정 파라미터 (단일/다중 공통)
     fixed = {}
@@ -884,9 +957,19 @@ def main():
             conf = replay(gt["frames"], p)
             res = score_run_multi(gt, conf, exit_gap=args.exit_gap, weights=weights,
                                   min_cov=args.min_coverage, collision_mm=args.collision_mm,
-                                  dwell_gap=args.dwell_gap)
+                                  dwell_gap=args.dwell_gap,
+                                  min_cov_person=args.min_coverage_person)
             cache[key] = res
             return res
+
+        def report_people(bd, head="  "):
+            """사람별 한 줄 — '모두 잡혔는가'(cov/획득)를 항상 눈에 보이게 남긴다."""
+            for g, pp in enumerate(bd["per_person"]):
+                flag = " ⚠미추적" if pp["missing"] else ""
+                print(f"{head}사람{g}({gt['labels'][g]}): cov={pp['cov']}{flag} "
+                      f"등장={pp['appears']}회(획득대기 {pp['acq_wait']}s, 미획득 {pp['never_acq']}) "
+                      f"sw_in={pp['sw_in']} dup={pp['dup']} n_ids={pp['n_ids']} "
+                      f"reentry={pp['reentry']} 체류결손={pp['dwell_deficit']}s")
 
         base_score, bd_base = evaluate({})
         print(f"\n[base replay]  score={bd_base['score']}  sw_in={bd_base['sw_in']} "
@@ -894,11 +977,13 @@ def main():
               f"{bd_base['xmerge_ep']}/{bd_base['xmerge_frames']} cov={bd_base['coverage']} "
               f"체류결손={bd_base['dwell_deficit']}s(score {bd_base['dwell_score']}) "
               f"invalid={bd_base['invalid']}")
+        print(f"  표현(repr) score={bd_base['repr_score']}: 미추적 인원={bd_base['n_missing']}명"
+              f"(최저 cov={bd_base['min_cov_person']}, 기준 {args.min_coverage_person}) "
+              f"커버리지결손={bd_base['cov_loss']} 획득대기={bd_base['acq_wait']}s "
+              f"미획득등장={bd_base['never_acq']}회")
         print(f"  최소 인물간 거리={bd_base['min_interperson']}mm · 겹침프레임={bd_base['collision_frames']} "
               f"(collision-mm={args.collision_mm:.0f})")
-        for g, pp in enumerate(bd_base["per_person"]):
-            print(f"  사람{g}({gt['labels'][g]}): sw_in={pp['sw_in']} dup={pp['dup']} "
-                  f"n_ids={pp['n_ids']} reentry={pp['reentry']} cov={pp['cov']} 체류결손={pp['dwell_deficit']}s")
+        report_people(bd_base)
 
         if not active:
             print("\n탐색할 파라미터가 없습니다(모두 고정?)."); return 0
@@ -920,17 +1005,24 @@ def main():
         print(f"  개선(base→best): 교차병합 ep {bd_base['xmerge_ep']}→{best_bd['xmerge_ep']} "
               f"(frame {bd_base['xmerge_frames']}→{best_bd['xmerge_frames']}), "
               f"sw_in {bd_base['sw_in']}→{best_bd['sw_in']}, dup {bd_base['dup']}→{best_bd['dup']}, "
-              f"체류결손 {bd_base['dwell_deficit']}s→{best_bd['dwell_deficit']}s")
-        for g, pp in enumerate(best_bd["per_person"]):
-            print(f"  사람{g}: sw_in={pp['sw_in']} dup={pp['dup']} n_ids={pp['n_ids']} "
-                  f"cov={pp['cov']} 체류결손={pp['dwell_deficit']}s")
+              f"체류결손 {bd_base['dwell_deficit']}s→{best_bd['dwell_deficit']}s, "
+              f"미추적 인원 {bd_base['n_missing']}→{best_bd['n_missing']}명, "
+              f"획득대기 {bd_base['acq_wait']}s→{best_bd['acq_wait']}s")
+        report_people(best_bd)
+        if best_bd["n_missing"]:
+            print(f"  ⚠ 최적 결과에도 '사실상 미추적' 인원이 {best_bd['n_missing']}명 남았습니다 — "
+                  f"--w-miss-person/--w-acq 를 더 올리거나(run_optimization.sh 의 W_MISS_PERSON/W_ACQ), "
+                  f"그 로그의 센서 커버리지 자체를 확인하세요.")
         print("=" * 70)
         save_params(final, active, fixed, args.out,
                     [f"optimize_fusion.py 다중-인물 결과 (score={best_score:.1f})",
                      f"GT: {' + '.join(gt['labels'])} ({gt['n']}인, {gt['length']}프레임)",
                      _interval_note(args.interval_sec),
                      f"교차병합 ep {bd_base['xmerge_ep']}→{best_bd['xmerge_ep']}, "
-                     f"sw_in {bd_base['sw_in']}→{best_bd['sw_in']}"],
+                     f"sw_in {bd_base['sw_in']}→{best_bd['sw_in']}",
+                     f"인원 표현: 미추적 {bd_base['n_missing']}→{best_bd['n_missing']}명 "
+                     f"(사람별 cov " + " / ".join(str(p['cov']) for p in best_bd['per_person']) +
+                     f"), 획득대기 {bd_base['acq_wait']}→{best_bd['acq_wait']}s"],
                     interval_sec=args.interval_sec)
         return 0
 

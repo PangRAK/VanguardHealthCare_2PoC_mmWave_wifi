@@ -15,6 +15,14 @@
 #   · OUT(전 센서 미검출)로 EXIT_GAP 이상 이탈 후 복귀 → ID 바뀌어도 허용
 #   · 검출 중(최소 1센서) 또는 마진 안(±MARGIN_DEG°, MARGIN_MM mm)에서 다른 ID 로 교체·중복 → 금지(벌점)
 #   · 두 사람을 한 ID 로 잘못 합침(교차병합) → 무거운 벌점(병합이 과도하게 느슨해지는 걸 막는 핵심)
+#   · ★ 등장한 사람은 '모두' 잡혀야 한다 → 사람별 커버리지·획득 지연에 무거운 벌점(아래 '표현' 블록)
+#
+# ★ 2026-08-05 재조정 — "안 잡는 게 이득" 역인센티브 제거
+#   예전엔 커버리지를 전원 합산으로만 봐서, 3인 중 한 명을 통째로 놓쳐도 벌점이 W_COV×(1/3)≈167 뿐인데
+#   그 사람의 스위칭·중복 벌점(수천점)은 함께 사라졌다 → 최적화가 NOISE_RADIUS 를 2500mm 까지 키워
+#   (확정 트랙 반경 안의 '처음 보는' 점을 흡수) 3번 로그의 사람을 절반 넘게 지워버렸다(cov 0.50).
+#   흡수된 점은 트랙 members 에 안 들어가 교차병합 벌점에도 안 걸린다 → 채점이 못 보던 구멍.
+#   그래서 사람 단위(등장 인원 전원 표현) 벌점 4개를 추가하고 그 가중치를 스위칭보다 크게 뒀다.
 #
 # ※ 재식별(ReID: REID_DIST/REID_MAX_GAP)도 탐색 대상. 먹혔다 재등장 시 옛 ID 복원 → 스위칭↓ 이지만,
 #   너무 넓/길면 남을 옛 ID 로 되살릴 위험(교차병합/스위칭 벌점으로 자동 견제). FIX_REID_DIST=0 이면 ReID 끔.
@@ -60,15 +68,23 @@ MARGIN_DEG=55       # INSIDE 각도 마진(±도). 가로 110° → 55
 MARGIN_MM=5000      # INSIDE 거리 마진(mm). 5m
 EXIT_GAP=1.5        # 이 시간(초) 이상 전 센서 미검출 = 진짜 이탈(그 후 ID 바뀜 허용)
 DWELL_GAP=8.0       # 이 시간(초) 이상 공백 = 체류 에피소드 종료. REID_MAX_GAP 탐색범위보다 커야(그 안 ReID 실패도 체류결손으로 채점)
-MIN_COVERAGE=0.4    # INSIDE 최소 추적률(미만이면 '추적실패'로 무효 — 스위칭0 꼼수 방지)
+MIN_COVERAGE=0.4    # 전원 합산 최소 추적률(미만이면 '추적실패'로 무효 — 스위칭0 꼼수 방지)
 # ===== 벌점 가중치 (클수록 그 항목을 더 강하게 억제) =====
 W_SW_IN=1000        # 마진 안 스위칭 (최우선 억제)
 W_SW_ED=400         # 가장자리 스위칭
 W_DUP_IN=300        # 마진 안 중복(1명이 여러 ID)
 W_DUP_ED=120        # 가장자리 중복
-W_COV=500           # 추적 커버리지 손실
+W_COV=500           # 추적 커버리지 손실(전원 합산 — 아래 사람별 항목이 실제 억제력)
 W_IDS=10            # 전체 등장 ID 수
 W_DWELL=20          # 체류시간 결손 1초당 벌점(정체성 조각으로 잃은 연속 체류시간 — ReID 성패 반영). 0=끔
+# ===== ★ 표현(representation) — "이 로그들에 나오는 인원을 모두 잡았는가" =====
+#   전부 '사람 단위' 라 오래 머문 사람이 짧게 들르는 사람을 가리지 못한다(present 프레임 수 무관).
+#   한 명을 통째로 버리는 선택이 스위칭 몇 번보다 훨씬 비싸도록 스위칭(1000)보다 크게 잡았다.
+MIN_COV_PERSON=0.6   # 사람별 최소 커버리지 — 미만이면 그 사람은 '사실상 미추적'
+W_MISS_PERSON=20000  # 미추적 인원 1명당(= 스위칭 20회). 새 인원을 삼키는 HP 를 사실상 금지
+W_COV_PERSON=3000    # 사람별 커버리지 결손 Σ(1−cov_g) — 미추적 직전까지 이어지는 gradient
+W_ACQ=300            # '등장' 후 확정 트랙이 안 생기고 흐른 시간 1초당(새로 나타난 인원 획득 지연)
+W_NEVER_ACQ=2000     # 등장했는데 끝까지 트랙을 못 얻은 횟수당
 # ===== 파라미터 고정 (값 주면 '고정', 비우면 '최적화 대상') =====
 #   예) MERGE_MM 을 100 으로 고정하고 나머지 최적화:  FIX_MERGE_MM=100
 FIX_WINDOW=;          FIX_STRIDE=1;          FIX_FUSE_MIN_FRAMES=
@@ -88,8 +104,8 @@ VIDEO_OUT="$ANALYSIS_DIR/compare.mp4"         # 최적화 전(좌)/후(우) 좌�
 VIDEO_STRIDE=1                                # N프레임마다 1장 렌더(↑빠름·거침). 1=전프레임
 # =========================================================
 
-# CLI 로 --gt-logs 를 넘기면(문서화된 오버라이드) 영상 단계도 같은 로그를 쓰도록 GT_LOGS 동기화.
-# (안 하면 최적화는 CLI 로그, 영상은 하드코딩 GT_LOGS 로 서로 다른 장면을 그림 — 리뷰 지적)
+# CLI 로 --gt-logs / --out 을 넘기면(문서화된 오버라이드) 영상 단계도 같은 것을 쓰도록 동기화.
+# (안 하면 최적화는 CLI 값, 영상은 하드코딩 GT_LOGS/OUT 으로 서로 다른 장면·다른 HP 를 그림)
 _a=("$@"); _n=${#_a[@]}; _i=0
 while [ $_i -lt $_n ]; do
   if [ "${_a[$_i]}" = "--gt-logs" ]; then
@@ -98,6 +114,8 @@ while [ $_i -lt $_n ]; do
       _cli="$_cli ${_a[$_j]}"; _j=$((_j + 1))
     done
     GT_LOGS="${_cli# }"
+  elif [ "${_a[$_i]}" = "--out" ] && [ $((_i + 1)) -lt $_n ]; then
+    OUT="${_a[$((_i + 1))]}"
   fi
   _i=$((_i + 1))
 done
@@ -108,7 +126,9 @@ COMMON=(--iters "$ITERS" --cd-rounds "$CD_ROUNDS" --seed "$SEED"
   --dwell-gap "$DWELL_GAP" --min-coverage "$MIN_COVERAGE"
   --w-switch-inside "$W_SW_IN" --w-switch-edge "$W_SW_ED"
   --w-dup-inside "$W_DUP_IN" --w-dup-edge "$W_DUP_ED"
-  --w-coverage "$W_COV" --w-ids "$W_IDS" --w-dwell "$W_DWELL")
+  --w-coverage "$W_COV" --w-ids "$W_IDS" --w-dwell "$W_DWELL"
+  --min-coverage-person "$MIN_COV_PERSON" --w-miss-person "$W_MISS_PERSON"
+  --w-cov-person "$W_COV_PERSON" --w-acq "$W_ACQ" --w-never-acq "$W_NEVER_ACQ")
 
 # 인자 조립: 공통 + 겹침/교차 관련. GT_LOGS 가 있으면 --gt-logs 추가.
 # (GT_LOGS 가 비어 있으면 CLI 의 --gt-logs/--log 를 기대 — 둘 다 없으면 optimize_fusion.py 가 안내 후 종료)

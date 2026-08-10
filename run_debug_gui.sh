@@ -62,7 +62,7 @@ REC="$REC_DIR/raw_$(date +%Y%m%d_%H%M%S).jsonl"   # 기록 파일(빈 값으로 
 # 실행(기록) 시간(초). 이 시간이 지나면 자동 종료하며 기록 파일을 정상 마감한다.
 #   기본 60초. 0 이면 수동 종료(창 닫기)까지 계속.
 #   덮어쓰기: DURATION=120 ./run_debug_gui.sh   또는   ./run_debug_gui.sh --duration 120
-DURATION="${DURATION:-120}"
+DURATION="${DURATION:-300}"
 # =========================================================
 
 FUSION_ARGS=(

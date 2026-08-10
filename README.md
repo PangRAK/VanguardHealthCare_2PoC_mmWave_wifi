@@ -42,6 +42,8 @@ USB 케이블은 **최초 1회 Wi‑Fi 등록(프로비저닝)** 때만 쓰고, 
    받아 **융합·추적**해 화면에 그립니다.
 4. **(선택) 최적화** — ID 스위칭/오탐을 줄이려면 `./run_debug_gui.sh` 로 원시 로그를 기록하고
    `./run_optimization.sh` 로 하이퍼파라미터를 튜닝합니다. 결과(`best_params.yaml`)를 `./run_gui.sh` 가 자동 반영합니다.
+   채점은 **① 등장한 사람을 모두 잡았는가(표현) → ② ID 스위칭/중복 → ③ 교차병합 → ④ 체류시간 연속성** 순으로
+   무겁게 벌점을 매깁니다. ①이 가장 무거운 이유는 "안 잡으면 스위칭도 0" 이라는 역인센티브를 막기 위해서입니다.
 
 ---
 
@@ -129,7 +131,18 @@ cd /Users/pia/Desktop/RAK/Code/VanguardHealthCare_2PoC_mmWave_wifi
 ./run_optimization.sh                       # 기록한 단일-인물 로그들로 다중-인물 GT 를 만들어 HP 튜닝
                                             #  → debug_logs/best_params.yaml (run_gui.sh 가 자동 반영)
                                             #  → debug_logs/analysis/ 에 상관분석 + 전/후 비교 영상
+./run_replay.sh                             # (튜닝 없이) 같은 로그를 '지금 세팅' 그대로 재생 → MP4
+                                            #  → debug_logs/analysis/replay.mp4
+./run_replay.sh --per-log                   #  로그마다 따로 영상 1개씩
+./run_replay.sh --dwell-alert-sec 60        #  장기체류 경보 임계 1분(0=끔, 기본 300=5분)
 ```
+
+`run_replay.sh` 는 최적화를 돌리지 않고 현재 설정(`best_params.yaml` + 스크립트 상단 블록 —
+`run_gui.sh` 와 같은 규칙)으로만 재생합니다. 세팅을 바꾼 뒤 "그때 그 장면이 지금 세팅에서
+어떻게 보이는지" 확인·공유할 때 씁니다. **장기체류 경보도 라이브 GUI 와 똑같이 재현**합니다 —
+빨간 테두리 + 그 사람 빨간 마커 + 알림음(영상이라 그 시각에 '삐' 소리를 오디오 트랙으로 굽습니다).
+임계는 `DWELL_ALERT_SEC`(초, 0=끔). 기록이 2분짜리인데 임계가 5분이면 아무도 못 넘으므로,
+그때는 실행 로그가 그 기록의 **최대 체류 시간**과 함께 임계를 낮추라고 안내합니다.
 
 ---
 
@@ -241,7 +254,8 @@ VanguardHealthCare_2PoC_mmWave_wifi/
 ├─ ④ 최적화(HPO)
 │  ├─ optimize_fusion.py / run_optimization.sh  # 다중-인물 GT 로 HP 튜닝 → best_params.yaml
 │  ├─ merge_gt.py             # 단일-인물 로그 N개 → 다중-인물 GT 합성
-│  └─ replay_video.py         # 최적화 전/후 좌우 비교 MP4 생성
+│  ├─ replay_video.py         # 로그 재생 MP4 (단일 화면 / 최적화 전·후 좌우 비교)
+│  └─ run_replay.sh           # 튜닝 없이 '지금 세팅' 으로만 재생 → analysis/replay.mp4
 │
 ├─ 진단 / 요구사항
 │  ├─ check_sensors.py        # 센서 통신 빠른 점검(6053)
