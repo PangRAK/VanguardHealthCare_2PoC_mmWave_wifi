@@ -22,10 +22,11 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import socket
 import sys
 from urllib.parse import urlparse
 
-from improv_serial import ImprovSerial, ImprovError
+from improv_serial import ImprovSerial, ImprovError, is_usable_ipv4
 from epl_config import (
     load_config, save_config, upsert_sensor, set_sensor_camera, nonconforming_sensor_ids,
     get_sensors_for_camera, assign_camera_sensor_ids, short_id, CONFIG_PATH,
@@ -38,6 +39,27 @@ def _pick_port(arg_port: str | None) -> str | None:
     if arg_port:
         return arg_port
     return autodetect_port()
+
+
+def _resolve_ipv4(name: str) -> str:
+    """mDNS/DNS 이름을 IPv4 로 조회한다. 실패하면 "".
+
+    로그에서 IP 를 못 건진 경우의 **보조** 경로다. 노트북이 센서와 같은 네트워크에
+    붙어 있어야만 되므로(프로비저닝은 USB 로 하니 그렇지 않은 경우가 많다) 주 경로가
+    될 수 없다."""
+    if not name:
+        return ""
+    if is_usable_ipv4(name):
+        return name
+    try:
+        infos = socket.getaddrinfo(name, None, socket.AF_INET)
+    except OSError:
+        return ""
+    for info in infos:
+        ip = str(info[4][0])
+        if is_usable_ipv4(ip):
+            return ip
+    return ""
 
 
 def _print_networks(nets):
@@ -158,16 +180,56 @@ def main() -> int:
                 print(f"❌ 연결 실패: {e}  {('— ' + hint) if hint else ''}")
                 return 5
 
-            # 5) 결과 저장
+            # 5) 결과 저장 — host 에는 mDNS 이름이 아니라 **실제 IP** 를 남긴다.
+            #  · mDNS 이름(<node>.local)은 노트북·공유기의 mDNS 가 막히면 그대로 접속
+            #    불가가 되는데, 그 시점에 IP 를 알 단서가 아무것도 남지 않는다(공유기
+            #    관리페이지를 뒤져야 한다). IP 는 지금 이 자리에서 공짜로 확인된다.
+            #  · 확인 순서: improv 응답 URL → ESPHome 연결 로그 → mDNS 조회.
+            #    EPL 기본 빌드는 web_server/next_url 이 없어 URL 이 빈 목록이라 사실상
+            #    로그가 주 경로다(improv_serial._IP_LOG_RE 주석 참조).
+            #  · node_name 은 그대로 저장하므로 mDNS 이름을 잃지는 않는다 — 도구들은
+            #    host 가 비면 node_name.local 로 떨어진다(diagnose.py).
             url = urls[0] if urls else ""
-            host = urlparse(url).hostname if url else ""
-            # 센서가 URL 을 안 돌려줘도(web_server 꺼진 경우) mDNS 이름으로 접속 가능.
-            if not host and node_name:
-                host = f"{node_name}.local"
-                url = f"http://{host}"
+            url_host = (urlparse(url).hostname or "") if url else ""
+            mdns_name = f"{node_name}.local" if node_name else ""
+
+            host = url_host if is_usable_ipv4(url_host) else ""
+            if not host:
+                print("\n🔎 센서 IP 확인 중…")
+                # 짧게만 기다린다: 재접속이 있었다면 접속 정보 로그는 provision() 이
+                # 성공을 받기 **전에** 이미 찍혀 self.log 에 있어 즉시 반환된다. 여기서
+                # 오래 기다려 건질 수 있는 경우는 거의 없고(안 찍히는 사례는 아래 재부팅
+                # 경로가 담당한다) 그만큼 설치 시간만 버린다.
+                host = imp.wait_for_ip(timeout=8.0)
+            if not host:
+                host = _resolve_ipv4(url_host or mdns_name)
+            if not host:
+                # ★ 여기까지 빈손인 정상 사례가 있다: 센서가 **이미 그 Wi-Fi 에 붙어
+                #   있었으면** improv 가 재접속 없이 성공을 돌려줘서 ESPHome 이 접속
+                #   정보를 다시 찍지 않는다(로그에 IP 가 영원히 안 나온다). 그때는
+                #   재부팅시켜 부팅 로그에서 받아낸다 — 이게 없으면 '이미 맞는 Wi-Fi 에
+                #   붙은 센서' 만 골라서 mDNS 이름으로 기록되는 이상한 결과가 된다.
+                print("   로그에 IP 가 안 나옵니다(이미 연결된 센서) → 재부팅해 확인합니다…")
+                host = imp.reset_and_wait_for_ip(timeout=45.0)
+            got_ip = bool(host)
+            if not host:
+                # IP 를 못 얻었으면 mDNS 이름이라도 남긴다(빈 host 는 그 센서를
+                # get_sensors() 가 걸러내 라이브에서 조용히 사라지게 만든다).
+                host = url_host or mdns_name
+
             print("✅ Wi-Fi 연결 성공!")
-            if url:
-                print(f"   장치 주소: {url}")
+            if got_ip:
+                print(f"   장치 IP: {host}" + (f"   (mDNS: {mdns_name})" if mdns_name else ""))
+                # IP 를 적어두는 대가: mDNS 이름과 달리 IP 는 임대가 갱신되면 바뀔 수 있고,
+                # 그러면 이 파일의 host 가 조용히 낡는다(도구는 옛 IP 로 붙다가 실패).
+                print("   · DHCP 로 IP 가 바뀌면 접속이 끊깁니다 — 공유기에서 이 센서에"
+                      " 고정 할당(DHCP 예약)을 권장합니다.")
+            elif host:
+                print(f"   장치 주소: {host}")
+                print("   ⚠ 실제 IP 를 확인하지 못해 mDNS 이름을 기록합니다 —")
+                print("     mDNS 가 막힌 네트워크에서는 접속이 실패할 수 있습니다.")
+                print(f"     → 공유기 관리페이지에서 IP 확인 후 {CONFIG_PATH} 의"
+                      " 해당 센서 \"host\" 를 IP 로 고치세요.")
             cfg = load_config()
             # ★ 파일은 있는데 파싱이 안 됐다(JSON 문법 오류 등) → 그대로 저장하면 기존 센서
             #   목록·캘리브레이션 좌표가 **전부 사라진다**. 손상 파일을 살려두고

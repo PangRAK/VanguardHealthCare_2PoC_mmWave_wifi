@@ -291,6 +291,58 @@ user_param["user_param"]["cameraId"]  /  ["organization"]
 
 ## [변경 로그]
 
+- **2026-08-11 (프로비저닝: `host` 를 실제 IP 로 기록 + improv 무응답 근본원인 규명)**
+  - ★★ **`improv_serial` 이 무응답인 진짜 이유 = 센서에 남은 옛 Wi-Fi 자격증명.** 증상은
+    `❌ 센서가 Improv 응답을 하지 않습니다. (펌웨어/포트 확인)` 인데 **펌웨어도 포트도 정상**이다.
+    ESPHome 소스(2025.6.2)로 확인한 사슬:
+    · `WiFiComponent::can_proceed()` = `has_sta() && !is_connected() && !ap_setup_` → **false**
+    · `Application::setup()` 은 `do {...} while (!component->can_proceed());` 로 **블록**
+    · `improv_serial` 은 `setup_priority::AFTER_WIFI` → wifi **뒤**라서 `setup()` 이 아예 안 돌고,
+      그래서 시리얼로 IMPROV 프레임을 보내도 **응답할 주체가 없다**(200회 요청 → 0바이트).
+    즉 **저장된 SSID 가 주변에 없으면 USB 프로비저닝이 원리적으로 불가**하다 — 새 센서(미프로비저닝,
+    `has_sta()`=false)일 때만 되고, 한 번 등록된 센서를 **다른 Wi-Fi 로 옮기려면** 옛 AP 가 필요하다.
+  - **진단 지표(포트/케이블 의심 전에 이것부터 볼 것)**: 부팅 로그에 `ESPHome version … compiled on`
+    (=`dump_config`) 이 **안 찍히면** setup 미완료 = 이 증상이다. 함께 `[D][wifi:076]: Loaded saved
+    settings: <옛 SSID>` 가 보인다. 정상이면 `[C][improv_serial:032]: Improv Serial:` 이 찍힌다.
+  - **탈출 경로 3개**: ① 옛 AP 를 잠깐 켠다(무위험, 연결되면 setup 완료 → improv 살아남) ②
+    **BLE Improv** — `esp32_ble` 은 wifi 보다 먼저 셋업되므로 살아있다(`esp32_improv: Service
+    started!`). Chrome/Edge(Web Bluetooth, Safari 불가) ③ NVS 소거
+    (`esptool erase-region 0x390000 0x6d000` — 파티션표 기준). ⚠ EPL 기본 빌드에는 `captive_portal`·
+    폴백 AP 가 **없어**(펌웨어 문자열 0건) 센서 자체 AP 로 들어가는 길은 없다.
+  - **`host` 에 mDNS 이름 대신 실제 IP 를 기록**(§11 "프로비저닝에서 센서 IP 캡처 → IP 직결,
+    mDNS 비의존" 원칙을 도구에 반영 — 그동안은 손으로 고쳤다). 확인 순서:
+    improv 응답 URL → **ESPHome 연결 로그** → mDNS 조회 → (실패 시) `.local` + 경고.
+    · 주 경로가 로그인 이유: improv WIFI_SETTINGS 응답의 URL 은 펌웨어에 `web_server` 나 improv
+      `next_url` 이 있을 때만 채워지는데 **EPL 기본 빌드엔 둘 다 없어 빈 목록**이다(그래서 지금까지
+      `.local` 만 남았다). `IP Address: %s` 로그는 설정과 무관하게 항상 찍히고 **노트북이 그 Wi-Fi 에
+      붙어 있지 않아도** USB 로 읽힌다 → 크로스 서브넷 설치에 그대로 맞는다.
+    · `improv_serial.py`: `iter_frames(buf, log_out=None)` 가 '프레임 아님' 으로 버리는 바이트를
+      모아주고, `find_ip_in_logs()` / `is_usable_ipv4()` / `ImprovSerial.wait_for_ip()` 추가.
+      **`0.0.0.0`(DHCP 완료 전)과 `169.254.x.x`(DHCP 실패)는 거부** — 그대로 적으면 주소는 있는데
+      접속만 조용히 실패한다. 로그에 여러 번 찍히므로 **마지막 유효값**을 쓴다.
+    · `mmwave_wifi_reader.discover_sensors()` 도 같은 규칙 — 이미 zeroconf 로 알아낸 `address` 를
+      `host` 에 쓴다(이름을 쓰면 접속 때 mDNS 를 한 번 더 타서 '탐색은 되는데 접속은 안 되는' 상태).
+    · **키 안전성**: 중복 판정(`spec_key`)·id 배정(`short_id`)은 `node_name` 을 먼저 보므로 host 가
+      IP 로 바뀌어도 흔들리지 않는다. 재프로비저닝은 `upsert_sensor._same()` 이 node_name 으로
+      기존 항목을 찾아 **host 만 갱신**한다(id·x/y/heading 보존 — 드라이런으로 확인).
+  - ★★ **폴백 필수 사례(실측) — '이미 그 Wi-Fi 에 붙어 있는 센서'**: improv 는 그 경우 **재접속
+    없이** 기존 연결을 근거로 성공을 돌려준다(§프로비저닝 주석의 오탐 경고와 같은 메커니즘).
+    그러면 ESPHome 이 접속 정보를 다시 찍지 않아(그 줄은 **(재)접속 시점과 dump_config 에서만**
+    나온다) 로그에 IP 가 **영원히** 안 나타난다 — 이미 연결된 센서에서 25초/56KB 를 받아도
+    `IP Address` 0회였다. 그래서 3대 중 재접속이 일어난 1대만 IP 로, 나머지 2대는 `.local` 로
+    기록되는 결과가 나왔다(2026-08-11 실제 발생). 해결: `ImprovSerial.reset_and_wait_for_ip()`
+    — DTR/RTS 로 1회 재부팅해 부팅 로그에서 받아낸다(실측 13.7초). 주 경로 대기는 8초로
+    줄였다(재접속이 있었다면 그 줄은 provision() 이 성공을 받기 **전에** 이미 로그에 있다).
+  - ⚠ **IP 를 적는 대가**: mDNS 이름과 달리 IP 는 임대 갱신으로 바뀌면 그 host 가 조용히 낡는다.
+    `build_sources()` 는 설정 항목과 탐색 항목이 같은 node_name 이면 **설정 쪽을 우선**하므로 낡은
+    IP 가 자동으로 안 고쳐진다 → **공유기 DHCP 예약 권장**(스크립트도 그렇게 안내한다). 자동 치유
+    (IP 불통 시 mDNS 재조회)는 미구현 → §10 TODO.
+  - 검증: 유닛 18항목(실측 부팅 로그 + 합성 프레임 혼합, 바이트 유실/중복 0) + **실기 e2e** —
+    `Sensor 1`(`pia-1-1`) `host` 를 `everything-presence-lite-98bd80.local` → `10.128.20.150` 로
+    기록, `10.128.20.150:6053`(Native API) 접속 확인. 실제 펌웨어 출력에서 IP 추출도 확인
+    (`[C][wifi:442]:   IP Address: 10.128.20.150`, `Gateway`/`Subnet` 오인 없음).
+    Sensor 2·3 은 아직 `.local` — USB 재프로비저닝 때 IP 로 바뀐다.
+
 - **2026-08-05 (리플레이 영상에 장기체류 경보 재현 — 테두리·마커·알림음)**
   - `run_replay.sh` / `replay_video.py` 에 `--dwell-alert-sec`(기본 300초 = `run_gui.sh` 와 동일,
     0=끔) 추가. 판정 규칙은 라이브와 같은 코드 규약: dwell_sec ≥ 임계인 confirmed 트랙

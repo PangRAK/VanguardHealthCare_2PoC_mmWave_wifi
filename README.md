@@ -159,7 +159,7 @@ Wi‑Fi **비밀번호는 저장되지 않습니다**(프로비저닝 시 센서
     {
       "id": "pia-1-1",                                       // ★ {organization}-{cameraId}-{sensorId}
       "mac": "A4:F0:0F:98:BD:80",                            // 물리 센서 대조용(코드는 안 읽음)
-      "host": "10.201.31.120",                               // 접속 주소(고정 IP 권장)
+      "host": "10.201.31.120",                               // 접속 주소 — 프로비저닝이 실제 IP를 기록(DHCP 예약 권장)
       "node_name": "everything-presence-lite-98bd80",
       "name": "Sensor 1", "color": "#27e0c8",                // 화면 표시 이름·색
       "x": 0.0, "y": 0.0,                                    // 방 좌표계 위치(mm) — 자동 포지셔닝이 채움
@@ -215,6 +215,7 @@ id = "{organization}-{cameraId}-{sensorId}"        예: "pia-1-1"
 | 증상 | 해결 |
 |------|------|
 | 프로비저닝 시 포트 못 찾음 | USB 케이블/드라이버 확인, `--port` 로 직접 지정, 다른 프로그램의 포트 점유 해제 |
+| `센서가 Improv 응답을 하지 않습니다` | **대개 펌웨어/포트 문제가 아니다.** 센서에 남은 **옛 Wi‑Fi 자격증명**의 AP 가 주변에 없으면 ESPHome setup 이 wifi 에서 멈추고, 그 뒤 순서인 `improv_serial` 이 아예 시작되지 않는다(`setup_priority::AFTER_WIFI`). 판별: 부팅 로그에 `ESPHome version … compiled on` 이 **안 찍히고** `Loaded saved settings: <옛 SSID>` 가 보인다. 해결: ① 옛 AP 를 잠깐 켠다 ② **BLE Improv**(Chrome/Edge) ③ NVS 소거 `esptool erase-region 0x390000 0x6d000`. 상세는 `skill.md` 2026‑08‑11 |
 | `UNABLE_TO_CONNECT` | Wi‑Fi SSID/PW·신호세기 확인, **2.4GHz** 인지 확인(ESP32 는 5GHz 미지원) |
 | 시각화가 데모로 뜸 | `epl_config.json` 에 센서 없음 → 프로비저닝부터, 또는 `--host` 로 IP 지정 |
 | 센서에 도달 못함 | 노트북·센서가 **같은 Wi‑Fi/서브넷**인지, 공유기 **AP isolation(단말 격리)** 해제, DHCP 로 IP 바뀜 여부 확인 |

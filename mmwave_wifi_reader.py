@@ -342,7 +342,13 @@ def discover_sensors(timeout: float = 4.0,
                 pass
             results[node.lower()] = {
                 "node_name": node,
-                "host": f"{node}.local",
+                # host 에는 mDNS 이름 대신 **방금 조회로 알아낸 실제 IP** 를 쓴다
+                # (프로비저닝의 기록 규칙과 같다 — provision_wifi.py §5 주석).
+                # 이름을 쓰면 접속할 때마다 mDNS 를 한 번 더 타서, mDNS 가 막힌
+                # 네트워크에서는 '탐색은 됐는데 접속은 안 되는' 상태가 된다.
+                # ★ 중복 판정(_spec_key)과 id 배정(short_id)은 node_name 을 먼저 보므로
+                #   host 가 IP 로 바뀌어도 키가 흔들리지 않는다.
+                "host": address or f"{node}.local",
                 "address": address,
             }
     finally:
